@@ -1,0 +1,215 @@
+# Nostr CI (ngit-ci) workflow for the tollgate-wrt package in this
+# openwrt/packages fork.
+#
+# WHAT THIS FILE IS VERIFIED AGAINST
+#   GitHub source: https://github.com/FreedomTechFeed/packages -> default branch `master`
+#   The ngit `packages` repo is mirrored from that GitHub repo by the
+#   gh-ngit-ci bridge, so `master` is the content the coordinator actually
+#   builds. Every check below was executed against this branch in a worktree of
+#   it before being committed; .ngit/README.md carries the evidence and lists
+#   what is deliberately NOT covered.
+#
+# ngit-ci executes ONLY files under .ngit/act/workflows/ (.github/workflows/ is
+# detected but never executed by it), so this file is what gives the repo CI on
+# Nostr while GitHub keeps running the original multi-arch build workflows.
+#
+# net/tollgate-wrt/ on this branch is the upstream-submission shape: the package
+# recipe downloads the upstream source tarball and installs its runtime files
+# from the tarball's packaging/files/ directory. Nothing is vendored into this
+# repo, which is why there are no ./files/ checks here — those belong to the
+# FreedomTechFeed/feed repo (src-git feed shape), which does vendor files/.
+#
+# Every check below is cheap, deterministic and SDK-free.
+name: Packages Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  package-check:
+    name: Shell, Makefile and tarball consistency checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      PKG_DIR: net/tollgate-wrt
+      UPSTREAM: OpenTollGate/tollgate-module-basic-go
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends shellcheck
+          fi
+          shellcheck --version
+          echo "shellcheck: $(command -v shellcheck)"
+
+      - name: Check the package's own test harnesses
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(find "$PKG_DIR" -maxdepth 1 -name '*.sh' | sort)
+          [ "${#FILES[@]}" -gt 0 ] || { echo "FAIL: no *.sh test harness in $PKG_DIR"; exit 1; }
+
+          # Pin the expected set. test.sh and test-version.sh are the harnesses
+          # the openwrt/packages buildbot runs in the test environment after
+          # installing the package; test-feed-ci.sh validates this repo's CI
+          # configuration. Losing one is a coverage regression, not a silent
+          # success.
+          EXPECTED=(test.sh test-version.sh test-feed-ci.sh)
+          mapfile -t FOUND < <(printf '%s\n' "${FILES[@]}" | xargs -n1 basename | sort)
+          mapfile -t WANT < <(printf '%s\n' "${EXPECTED[@]}" | sort)
+          if [ "$(printf '%s\n' "${FOUND[@]}")" != "$(printf '%s\n' "${WANT[@]}")" ]; then
+            echo "FAIL: harness set mismatch"
+            echo "  found: $(printf '%s ' "${FOUND[@]}")"
+            echo "  want : $(printf '%s ' "${WANT[@]}")"
+            exit 1
+          fi
+
+          for f in "${FILES[@]}"; do
+            # The buildbot only runs what it can execute from the feed checkout.
+            [ -x "$f" ] || { echo "FAIL: $f is not executable"; exit 1; }
+            sh -n "$f"
+            echo "OK   $f"
+          done
+          # Same severity choice as the feed repo's workflow: /bin/sh here is
+          # busybox ash, so `local` (SC3043) and file-scope rc.common variables
+          # (SC2034) are warnings, not defects. Real errors still fail.
+          shellcheck --severity=error "${FILES[@]}"
+          echo "Test harnesses present, executable, parse, and pass shellcheck (errors only)."
+
+      - name: Run the repo's CI-config harness (test-feed-ci.sh)
+        run: |
+          set -euo pipefail
+          # This harness needs nothing installed: it asserts the repo's own
+          # .github/workflows/ still (a) builds tollgate-wrt for the bench arch
+          # aarch64_cortex-a53/mediatek-filogic, (b) publishes per-arch release
+          # assets with deterministic tollgate-wrt_<version>_<arch> names, and
+          # (c) keeps the runtime smoke test non-blocking. Unlike test.sh /
+          # test-version.sh it is a full run, not just a syntax check.
+          "$PKG_DIR/test-feed-ci.sh"
+
+      - name: Lint the package Makefile
+        run: |
+          set -euo pipefail
+          M="$PKG_DIR/Makefile"
+          [ -f "$M" ] || { echo "FAIL: $M not found"; exit 1; }
+
+          for field in PKG_NAME PKG_VERSION PKG_SOURCE_VERSION PKG_RELEASE \
+                       PKG_SOURCE PKG_SOURCE_URL PKG_HASH PKG_MAINTAINER \
+                       PKG_LICENSE PKG_LICENSE_FILES PKG_BUILD_DIR \
+                       PKG_TARBALL_DIR GO_PKG GO_PKG_BUILD_PKG; do
+            grep -qE "^${field}:=" "$M" || { echo "FAIL: missing ${field}:="; exit 1; }
+          done
+          grep -q 'BuildPackage' "$M" || { echo "FAIL: missing BuildPackage eval"; exit 1; }
+
+          # This branch is the openwrt/packages submission: the golang helpers
+          # must be included by their upstream-relative path, not the standalone
+          # src-git feed's $(TOPDIR)/feeds/... path.
+          grep -qE '^include \.\./\.\./lang/golang/golang-package\.mk' "$M" \
+            || { echo "FAIL: golang-package.mk must be included as ../../lang/golang/golang-package.mk for upstream"; exit 1; }
+
+          # This branch must NOT vendor a files/ tree: the runtime files ride
+          # along inside the upstream release tarball (packaging/files/) and are
+          # installed from $(PKG_TARBALL_DIR). A stray vendored copy here would
+          # be a second, drifting source of truth.
+          if grep -qE '\./files/' "$M"; then
+            echo "FAIL: Makefile installs from ./files/, which this branch does not vendor"; exit 1
+          fi
+          grep -qE '\$\(PKG_TARBALL_DIR\)/packaging/files/' "$M" \
+            || { echo "FAIL: Makefile does not install from \$(PKG_TARBALL_DIR)/packaging/files/"; exit 1; }
+          [ -d "$PKG_DIR/files" ] && { echo "FAIL: $PKG_DIR/files exists but this branch installs from the tarball"; exit 1; }
+
+          # Upstream policy for openwrt/packages. NOTE the leading [[:space:]]*:
+          # REPLACES and DEPENDS live INSIDE the `define Package/...` block and
+          # are tab-indented there, so an anchored ^DEPENDS regex silently never
+          # matches (a vacuous check).
+          if grep -qE '^[[:space:]]*REPLACES' "$M"; then echo "FAIL: REPLACES is not allowed upstream"; exit 1; fi
+          if grep -qE '^[[:space:]]*DEPENDS:=.*\+luci' "$M"; then echo "FAIL: packages must not depend on luci"; exit 1; fi
+          grep -qE '^PKG_LICENSE:=GPL-3\.0-only' "$M" || { echo "FAIL: PKG_LICENSE must be GPL-3.0-only"; exit 1; }
+          grep -qE '^PKG_LICENSE_FILES:=LICENSE' "$M" || { echo "FAIL: PKG_LICENSE_FILES must be LICENSE"; exit 1; }
+
+          # apk-tools 3.x (OpenWrt v24.10+) rejects a hyphen in the package
+          # version with `apk mkpkg` error 99, hence the PKG_VERSION /
+          # PKG_SOURCE_VERSION split documented in the Makefile.
+          V="$(grep -E '^PKG_VERSION:=' "$M" | sed 's/^PKG_VERSION:=//')"
+          case "$V" in
+            *-*) echo "FAIL: PKG_VERSION '$V' contains a hyphen; apk rejects it (use '_' as in 0.6.0_alpha1)"; exit 1 ;;
+          esac
+          printf '%s' "$V" | grep -qE '^[0-9][0-9A-Za-z._]*$' \
+            || { echo "FAIL: PKG_VERSION '$V' is not apk-legal"; exit 1; }
+
+          # The upstream git tag drives the tarball URL and every tag-named build
+          # dir, so PKG_SOURCE / PKG_SOURCE_URL / PKG_BUILD_DIR must agree with it.
+          SV="$(grep -E '^PKG_SOURCE_VERSION:=' "$M" | sed 's/^PKG_SOURCE_VERSION:=//')"
+          grep -qF 'PKG_SOURCE:=tollgate-module-basic-go-$(PKG_SOURCE_VERSION).tar.gz' "$M" \
+            || { echo "FAIL: PKG_SOURCE does not use \$(PKG_SOURCE_VERSION)"; exit 1; }
+          grep -qF 'tar.gz/v$(PKG_SOURCE_VERSION)' "$M" \
+            || { echo "FAIL: PKG_SOURCE_URL does not pin v\$(PKG_SOURCE_VERSION)"; exit 1; }
+          grep -qF 'tollgate-module-basic-go-$(PKG_SOURCE_VERSION)/src' "$M" \
+            || { echo "FAIL: PKG_BUILD_DIR is not tag-named from \$(PKG_SOURCE_VERSION)"; exit 1; }
+
+          HASH="$(grep -E '^PKG_HASH:=' "$M" | sed 's/^PKG_HASH:=//')"
+          [ "$HASH" != "skip" ] || { echo "FAIL: PKG_HASH is 'skip'"; exit 1; }
+          printf '%s' "$HASH" | grep -qE '^[0-9a-f]{64}$' || { echo "FAIL: PKG_HASH is not a 64-char sha256"; exit 1; }
+
+          # test-version.sh asserts the version the CLI prints; it hardcodes the
+          # upstream tag, so a version bump that forgets the harness must fail.
+          SH_VER="$(sed -n 's/^PKG_VERSION="\(.*\)"$/\1/p' "$PKG_DIR/test-version.sh")"
+          [ -n "$SH_VER" ] || { echo "FAIL: could not read PKG_VERSION out of $PKG_DIR/test-version.sh"; exit 1; }
+          [ "$SH_VER" = "$SV" ] \
+            || { echo "FAIL: test-version.sh PKG_VERSION='$SH_VER' != Makefile PKG_SOURCE_VERSION='$SV'"; exit 1; }
+
+          echo "Makefile lint passed (PKG_VERSION=$V, PKG_SOURCE_VERSION=$SV)."
+
+      - name: Verify PKG_HASH and packaging/files against the pinned tarball
+        run: |
+          set -euo pipefail
+          M="$PKG_DIR/Makefile"
+          EXPECTED="$(grep -E '^PKG_HASH:=' "$M" | sed 's/^PKG_HASH:=//')"
+          SV="$(grep -E '^PKG_SOURCE_VERSION:=' "$M" | sed 's/^PKG_SOURCE_VERSION:=//')"
+          URL="https://codeload.github.com/${UPSTREAM}/tar.gz/v${SV}"
+
+          echo "Fetching $URL"
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          curl -fsSL -o "$WORK/pkg.tar.gz" "$URL"
+
+          ACTUAL="$(sha256sum "$WORK/pkg.tar.gz" | awk '{print $1}')"
+          echo "expected=$EXPECTED"
+          echo "actual  =$ACTUAL"
+          [ "$EXPECTED" = "$ACTUAL" ] || { echo "FAIL: PKG_HASH does not match the pinned release tarball"; exit 1; }
+          echo "PKG_HASH matches the pinned release."
+
+          # Build/Prepare extracts the whole tarball into $(BUILD_DIR) and every
+          # install line reads from $(PKG_TARBALL_DIR)/packaging/files/... — so
+          # the tarball's top-level directory name must be exactly the tag-named
+          # path the Makefile computes, and every referenced path must exist.
+          mkdir -p "$WORK/x"
+          tar -xzf "$WORK/pkg.tar.gz" -C "$WORK/x"
+          ROOT="$WORK/x/tollgate-module-basic-go-${SV}"
+          [ -d "$ROOT" ] || { echo "FAIL: tarball does not extract to tollgate-module-basic-go-${SV}/"; exit 1; }
+          [ -f "$ROOT/src/go.mod" ] || { echo "FAIL: $ROOT/src/go.mod missing (PKG_BUILD_DIR would have no go.mod)"; exit 1; }
+          echo "Tarball layout matches PKG_TARBALL_DIR/PKG_BUILD_DIR."
+
+          refs="$(grep -oE '\$\(PKG_TARBALL_DIR\)/packaging/files/[^[:space:]]+' "$M" | sed 's/^.*packaging\/files\///' | sort -u)"
+          [ -n "$refs" ] || { echo "FAIL: no \$(PKG_TARBALL_DIR)/packaging/files/ references found in the Makefile"; exit 1; }
+          while IFS= read -r ref; do
+            if ! compgen -G "$ROOT/packaging/files/$ref" > /dev/null; then
+              echo "FAIL: Makefile installs packaging/files/$ref but the tarball has no match"
+              exit 1
+            fi
+            echo "OK   packaging/files/$ref"
+          done <<< "$refs"
+          echo "All $(printf '%s\n' "$refs" | wc -l) referenced packaging/files paths exist in the tarball."
+
+  # NOTE: there is no OpenWrt build job here by design. The SDK build needs a
+  # Docker container (openwrt/gh-action-sdk / openwrt/sdk images), which ngit-ci
+  # refuses, and takes 30-45 min per arch against a 30-min run ceiling. It stays
+  # on GitHub. See .ngit/README.md.
