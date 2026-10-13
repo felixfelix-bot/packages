@@ -31,7 +31,7 @@ The wizard can select these canonical tuples (see `arch.go`):
 |-----------------------|--------------------|---------------------|
 | `aarch64_cortex-a53`  | `mediatek-filogic` | GL-MT6000 (bench)   |
 | `mipsel_24kc`         | `mt7621`           | MT3000-class        |
-| `mips_24kc`           | `ath79-generic`    | —                   |
+| `mips_24kc`           | `ath79-generic`    | GL-AR300M (tester)  |
 | `x86_64`              | `x86-64`           | gl-gate             |
 
 ## Supported devices
@@ -109,45 +109,102 @@ memory-speed stability issue was fixed in 25.12.5 (upstream PRs #22929 /
 > tester with the device is being lined up, and this section will be updated
 > with real numbers once that has happened.
 
-### Compressed variants are built, but this feed does not publish them
+### Small-flash devices: the compressed variants exist, but not from a release
 
-The `upx-ultra-brute` artifacts are built by the module repo's CI and announced
-over Nostr (NIP-94 kind 1063, tag `compression=upx-ultra-brute`), but the
-release job here publishes only the default `.ipk`/`.apk` per
-(arch, target) row — so today a small-flash device cannot fetch the compressed
-variant from a release. Publishing the compressed variants (or a `small-flash`
-bundle alongside the existing per-arch one) is a candidate change to this
-repo's release matrix; it is not part of this documentation change.
+The `upx-ultra-brute` artifacts are built by the **module** repo's CI and
+announced over Nostr (NIP-94 kind 1063, tag `compression=upx-ultra-brute`), but
+the release job here publishes only the default `.ipk`/`.apk` per
+(arch, target) row — so a small-flash device cannot fetch a compressed variant
+from a release. Publishing the compressed variants (or a `small-flash` bundle
+alongside the existing per-arch one) is a candidate change to this repo's
+release matrix; it is not part of this documentation change.
 
-### Offline bundles are per-arch, not per-device
+The module repo does build a `mips_24kc` compressed variant
+(`build-package-ipk-upx-brute-mips-24kc.yml` and the `ipk-upx-fast-best` shard
+cover `--fast`, `--best` and `--brute`; `.ipk` only), so the artifact exists for
+mips — it is simply not a release asset here.
+
+### Offline (WAN-less) bundles are per-arch, not per-device
 
 The offline bundle is named `tollgate-wrt-<PKG_VERSION>-<arch>-offline.tar.gz`
 and there is exactly one per arch. `release-assets.py`'s `OFFLINE_BUNDLES` table
 and the `release-tooling.yml` self-test both assert that the bundle build matrix
 has one entry per expected bundle asset name, and the installer wizard's
-`tollgateArchAssets` map fetches the bundle by arch. A second bundle for the
-Cudy would collide with the existing `aarch64_cortex-a53` bundle name, so no
-per-device bundle entry is added.
+`tollgateArchAssets` map fetches the bundle by arch. A second bundle for a single
+device would collide with that arch's existing bundle name, so no per-device
+bundle entry is added.
 
 A device is still a real input to the bundle: the `profile` column of
 `OFFLINE_BUNDLES` (passed to `offline-bundle.py --profile`) names the
 `profiles.json` profile whose `device_packages` are assumed to already be in the
-base image. The `aarch64_cortex-a53` bundle assumes `glinet_gl-mt3000`, whose
+base image.
+
+`OFFLINE_BUNDLES` currently carries two rows:
+
+- `aarch64_cortex-a53` / `mediatek-filogic` / `25.12.5`, profile
+  `glinet_gl-mt3000`, `apk`
+- `mips_24kc` / `ath79-generic` / `25.12.5`, profile `glinet_gl-ar300m-lite`,
+  `apk`
+
+The `aarch64_cortex-a53` bundle assumes `glinet_gl-mt3000`, whose
 `device_packages` (`kmod-mt7915e`, `kmod-mt7981-firmware`, `mt7981-wo-firmware`,
 `kmod-hwmon-pwmfan`, `kmod-usb3`) are a **superset** of the Cudy WR3000 v1's
 (`kmod-mt7915e`, `kmod-mt7981-firmware`, `mt7981-wo-firmware`). The two extra
 kmods are not in `tollgate-wrt`'s dependency closure, so the existing bundle is
 correct for the Cudy and needs no per-device variant.
 
+The `mips_24kc` bundle assumes `glinet_gl-ar300m-lite`, whose `device_packages`
+is `kmod-usb2` alone — the smallest profile in the AR300M family
+(`glinet_gl-ar300m16` is identical). Assuming the smallest profile bundles
+strictly **more**, which is the safe direction: the bundle's members are
+additive and a package already in the base image is simply not needed.
+
 ## How it works
 
 ### Test build (`multi-arch-test-build.yml`)
 
-Runs on every pull request. It calls the openwrt shared
-`multi-arch-test-build` workflow with a **custom matrix override** that adds
-`aarch64_cortex-a53`/`mediatek-filogic` alongside the existing arches. The
-shared workflow's default matrix does NOT include the bench GL-MT6000 arch, so
-the override is mandatory — without it the bench router's arch never builds.
+Runs on every pull request. The workflow is **vendored** in this repo rather
+than calling the openwrt shared workflow, for two reasons:
+
+1. It always builds `tollgate-wrt`. The upstream "Determine changed packages"
+   step only builds packages whose `*/Makefile` changed, so a workflow-only PR
+   would build generic test packages and give **zero** signal about the package
+   this feed exists to ship.
+2. It carries a **custom matrix override** that adds
+   `aarch64_cortex-a53`/`mediatek-filogic` alongside the existing arches. The
+   shared workflow's default matrix does NOT include the bench GL-MT6000 arch,
+   so without the override the bench router's arch never builds.
+
+The runtime smoke test in that workflow is deliberately **non-blocking**
+(`continue-on-error: true`): upstream `openwrt/actions-shared-workflows#130`
+makes it fail deterministically (kmods feed 404) even when the package built
+fine. The **Build** phase — which actually compiles `tollgate-wrt` — is the
+gate.
+
+#### The SDK branch is pinned to an immutable release (`openwrt-25.12`)
+
+The Build phase is `openwrt/gh-action-sdk`, which downloads an SDK tarball and
+verifies it against the `sha256sums` published beside it. **`snapshots/` is a
+mutable tree**, so that verification can race its own inputs: measured
+2026-10-01 on PR #46 (run `36842992536`, job `Test aarch64_cortex-a72`), the job
+fetched `targets/bcm27xx/bcm2711/sha256sums` at 09:30:57 and the 266 MB SDK
+tarball finished **12 minutes later** at 09:42:31 — upstream had rotated the
+snapshot in between, so the verify step failed with `1 computed checksum did
+NOT match`. Seven of the eight arch jobs passed on that run; only the one whose
+SDK rotated mid-download died. Nothing about the pull request caused it, and it
+costs a full ~30-minute job each time it lands.
+
+A **released** version is immutable — `releases/<version>/targets/<target>/`
+`sha256sums` and the SDK tarball it describes never change — so verifying a
+download against them cannot race. The workflow therefore pins
+`SDK_BRANCH=openwrt-25.12`, with a fail-closed guard that refuses
+`main|master|snapshot*` rather than silently falling back to a snapshot.
+`release-publish.yml` already builds its `openwrt-24.10` lane from a
+release-branch SDK, so this is the same mechanism, not a new one.
+
+`net/tollgate-wrt/test-feed-ci.sh` Gate H asserts the pin, and carries a
+negative control that mutates a copy of the workflow back to `master` and
+requires the check to refuse it — so the assertion cannot pass vacuously.
 
 ### Release publish (`release-publish.yml`)
 

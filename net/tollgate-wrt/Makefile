@@ -240,7 +240,161 @@ PKG_NAME:=tollgate-wrt
 # `0.6.0_alpha4` build is NOT offered this package (only pre-train devices are),
 # by construction — the version string sorts below the tag even though these
 # bytes are newer than it.
-PKG_VERSION:=0.6.0_alpha4_pre19
+#
+# pre20 takes the pre20 version string and NOTHING ELSE. Every commit on
+# master since the pre19 tag (1a516d6f) is bundle-builder / test-suite only
+# (#36 keepalive seed, #37 dep-closure, #38 guard, #40 guard-robustness, #41
+# nodogsplash config FILE, #42 COMFAST target docs), so the MODULE PIN and
+# PKG_HASH are deliberately UNCHANGED from pre19 — the module package bytes
+# are identical. The WAN-less bundle does move: OFFLINE_INSTALLER_REF is
+# advanced to 4cf9074f, the PRTA main tip that carries #186 (the nodogsplash
+# config FILE seeded before the keepalive section, upstream source of truth)
+# and #187 (the WAN-less surface contract). That is a repository variable,
+# not a file in this repo, so it does not appear in this diff — stated here so
+# the bundle change is not invisible to a reader of the pin.
+#
+# Ordering still holds (the pre19 line, unchanged):
+#     0.6.0_alpha2_pre13 < 0.6.0_alpha4_pre15 < ... < 0.6.0_alpha4_pre19
+#     < 0.6.0_alpha4_pre20 < 0.6.0_alpha4_pre21 < 0.6.0_alpha4_pre22
+#     < 0.6.0_alpha4_pre23 < 0.6.0_alpha4
+#     < 0.6.0_alpha4_pre23 < 0.6.0_rc1_pre24 < 0.6.0_rc1
+# PKG_SOURCE_TAG stays v0.6.0-alpha4: the module repo-root VERSION file at
+# PKG_SOURCE_VERSION is unchanged, and a repin that does not move the pin
+# must not move the tag either.
+#
+# pre21 moves the pin and does nothing else — but unlike pre20, which took a
+# version string while the module had not moved, the module DID move this time,
+# so PKG_SOURCE_VERSION and PKG_HASH move with it (PKG_HASH is never recomputed
+# without a pin move, and is never left stale across one). The pin is now the
+# merged module main TIP 74cd6f99, which carries the three PRs the release was
+# waiting on:
+#   #625  the physical wired LAN ports move off the captive bridge onto
+#         br-private — a cabled client is an owner-class client with internet,
+#         the admin board and LuCI, and no payment step. This is the #607 SPLIT
+#         the operator approved for this release; the full role machinery
+#         (`tollgate.lan_ports.role`, `br-mgmt`) stays in #607, unmerged.
+#   #624  generate the admin password without `od` — OpenWrt 25.12.5 images
+#         ship a stripped busybox with no `od`, so the generator produced an
+#         empty string and no root password could be applied.
+#   #611  align golang.org/x/time across the nested modules so the contract
+#         gate passes.
+# NOT in this pin, and therefore NOT released by pre21: #605 (device-code
+# pairing) and #607 (the LAN-role machinery). They remain open.
+# PKG_SOURCE_TAG is UNCHANGED (v0.6.0-alpha4): the repo-root VERSION file at
+# 74cd6f99 is still v0.6.0-alpha4, re-verified by extracting the pinned
+# tarball's own VERSION rather than from memory, and enforced on every run by
+# test-pkg-tarball-parity.sh Gate B.
+#
+# pre22 moves the pin and does nothing else — the same shape as pre21 (the
+# module moved, so PKG_SOURCE_VERSION and PKG_HASH move with it; PKG_HASH is
+# never recomputed without a pin move, and is never left stale across one). The
+# pin is now the merged module main TIP 8b9ba86e, ONE commit past pre21's
+# 74cd6f99:
+#   #638  the owner-network API exemption. 30-backend-firewall.nft dropped
+#         :2121 for every interface except br-lan and lo, and the admin board
+#         lives on br-private — so the :8090 config UI rendered and every data
+#         call it then made (http://<router>:2121/) was dropped silently, with
+#         nothing the user could act on. The exemption set becomes
+#         { "br-lan", "br-private", "lo" } for both nfproto families. The FEED
+#         ships this without a feed-side file change because the install recipe
+#         stages the module's WHOLE etc/nftables.d/ directory by wildcard, so
+#         the fragment rides the pin move.
+# Nothing else moves: PKG_SOURCE_TAG stays v0.6.0-alpha4 (the repo-root VERSION
+# file at 8b9ba86e is still v0.6.0-alpha4, re-verified by extracting the pinned
+# tarball's own VERSION rather than from memory, and enforced on every run by
+# Gate B), and the portal lock is untouched because #638 changes no portal file.
+# Still NOT in this pin, and therefore still NOT released by pre22: #605
+# (device-code pairing) and #607 (the LAN-role machinery) — the same two pre21
+# named.
+#
+# pre23 moves the pin and does nothing else -- the same shape as pre22 and pre21
+# (the module moved, so PKG_SOURCE_VERSION and PKG_HASH move with it; PKG_HASH is
+# never recomputed without a pin move, and is never left stale across one), and
+# it changes no feed-side file other than this one. The pin is now the merged
+# module main TIP cec22228, FOUR commits past pre22's 8b9ba86e:
+#   #604  the private SSID's credentials and the administration-path scope become
+#         operator settings: the setup writer reads them from config instead of
+#         deriving them, so an operator's private-SSID key and the scope of the
+#         administration path are theirs to set rather than regenerated.
+#   #612  TLS ordering and install identity: the derived hop lands before the
+#         reload, the operator's identity survives an install, and the postinst
+#         runs the boot order the module expects.
+#   #573  the session meter survives a MAC rotation -- session tickets are
+#         issued/verified/rebound, so a client whose MAC changes keeps the access
+#         it already paid for instead of silently losing the session.
+#   #649  the legacy re-brand :8090 writer is DELETED. 99-tollgate-setup no
+#         longer carries the second :8090 configUI section (brand-gated, so it
+#         only ever fired on a re-branded router) and no longer carries the
+#         re-brand string anywhere: uhttpd.admin, staged by the portal's
+#         92-tollgate-admin-setup, is the single owner of :8090, and the repair
+#         path now DELETES a stale foreign :8090 section, so an upgraded router
+#         converges on exactly one owner instead of two bind-fighting ones. The
+#         pinned tree carries ZERO occurrences of the old brand literal.
+#
+# What does NOT change with this pin, so a reader does not have to re-derive it:
+# the wired LAN ports stay on br-private (#625), i.e. a cabled client is an
+# owner-class client with the admin board, LuCI and internet and no payment step,
+# while the guest SSIDs stay on the captive bridge behind the portal and the
+# guards in 31-/32-*.nft keep dropping :8090/:8443 and :8080/:443 for br-lan --
+# the wire is not a guest.
+# PKG_SOURCE_TAG stays v0.6.0-alpha4: the repo-root VERSION file at cec22228 is
+# still v0.6.0-alpha4, re-verified by extracting the pinned tarball's own VERSION
+# rather than from memory, and enforced on every run by
+# test-pkg-tarball-parity.sh Gate B.
+# The portal lock is untouched because none of the four commits changes portal
+# content -- the only portal-adjacent path in the diff is the module's own
+# packaging/portal-build.sh, which is module source, not portal content.
+# ---------------------------------------------------------------------------
+# pre24 moves the pin and does nothing else -- the same shape as every repin before it:
+# the module moved, so PKG_SOURCE_VERSION and PKG_HASH move with it (PKG_HASH is
+# never recomputed without a pin move and never left stale across one), and no
+# other feed-side file changes.
+# The pin is now the merged module main tip 2de7955, and the repo-root VERSION file
+# inside that tarball is v0.6.0-rc1, so PKG_SOURCE_TAG moves with it
+# (v0.6.0-alpha4 -> v0.6.0-rc1) -- Gate B in test-pkg-tarball-parity.sh compares the two
+# and fails the build if they disagree.
+# Delta since cec2222 (57 commit(s)):
+#   fix(merchant): make the test log capture concurrency-safe (intermittent -race failure) (#622)
+#   fix(merchant): a concurrent duplicate of one note is refused before the mint, not raced past its spend-state (#641)
+#   fix(valve): a "client not found" answer is only evidence about the MAC it names (#617)
+#   ci(ngit): stamp stage 1 from the commit, never the runner clock (#529)
+#   fix(packaging): refuse to build a local .ipk without staged portal bundles (#556)
+#   fix(utils): hex-encode the fingerprint salt — raw edge bytes corrupted reloads (#571)
+#   fix(wallet): no same-body retry after an ambiguous mint outcome — repin gonuts v0.13.0, classify as outcome-unknown (#640) (#660)
+#   fix(merchant): a paid purchase whose gate cannot open is an owed entitlement, not a lost one (#403) (#661)
+#   test(fleet): require credentials from the environment, not public defaults (#528)
+#   fix(merchant): bound the fee precheck against wedged mints (#525) (#533)
+#   docs(operator-guide): cover the ssl family and upstream known; regen man pages (#662)
+#   fix(cli): bound fw4 reload on the daemon start path — a wedged firewall must not stall the service before Serve (#637) (#654)
+#   fix(config): config.json writes are atomic and a missing config is announced (#402 hardening) (#655)
+#   fix(config): min_steps floors at 1 — parser accepts the legacy spelling, schema and templates say 1 (supersedes #634, ports fork #104) (#656)
+#   ci: enroll in org gitleaks scanning; watch main on push (ports fork #91 + #98's follow-up) (#657)
+#   fix(config): refuse an out-of-bounds private_key at config set — a persisted credential the applier will refuse forever is a dead end (#636) (#652)
+#   fix(cli): config get no longer returns the identities' Nostr private keys — blanked, reported via secret_set, preserved on save (#635) (#653)
+#   test(cloud-lab): conformance fast-subset lane over the PRTA fault proxy (#503) (#535)
+#   make: one release-check gate that orchestrates the existing gates — plus the two gate repairs it exposed (#658)
+#   release: v0.6.0-rc1 — feature freeze (merge last) (#659)
+#   docs(agents): the gonuts bump touches four go.mod files, not three (#647)
+#   deps(wallet): bump gonuts-tollgate v0.13.0 — NUT-20 cdk-interop signatures + per-route POST retry policy (#643)
+#   docs(readme): the WR3000 25.12 install paragraph gains the feed-shape caveat (#552) (#644)
+#   test(packaging): an apk3 dependency-resolution smoke gates the release apk (#645)
+#   fix(build): build-sdk-package.sh compiles package main, not main.go alone (#646)
+#   fix(lane): resolve the conflict-marker residue #658's rebase left in run-conformance.sh (#663)
+#   test(merchant): the owed-grant AUTH assertion polls for its own condition (#664)
+#   docs(agents): hardware and VM testing is coordinated through labgrid (#666)
+#   docs: decision records rebased — discovery signaling (#621), ADR citations (#626), host-mode admin (#632) (#667)
+#   feat(setup): the gateway serves NTP pre-auth — time before payment (#627) (#648)
+#   test(packaging): rootfs-container tier for uci-defaults validation — rebase of #530 (#671)
+#   test(contract): pin the shipped AP SSID format — rebase of #524 (#672)
+#   feat(upstream): cold-start reseller bootstrap — forward the first proof whole (#239 phase 2a) (#629)
+#   test(cloud-lab): run-scoped lab runner + shared-host runbook (#557)
+#   docs(tests): map the test estate in the parent README (#674)
+#   test(cloud-lab): one payment suite against many mints (signet zoo matrix) — rebase of #522 (#673)
+#   fix(vendor-ie): explicit 255-byte overflow policy — truncate the mint TLV, report it, never silently diverge (#675)
+#   docs(tests): the cloud-lab runbook is in main — drop the stale hedge (#677)
+#   fix(upstream): reseller renewals self-deadlock — bootstrap candidate check must not run under paymentMu (#629 follow-up) (#678)
+#   test(cloud-lab): #497 crash-window harness — SIGKILL between mint-signed and wallet-save (#676)
+PKG_VERSION:=0.6.0_rc1_pre24
 # PKG_SOURCE_VERSION is the upstream source pin: an immutable 40-char COMMIT
 # SHA, NOT a tag and NOT a branch. A shared community feed must not chase a
 # moving branch (hash churn, unreproducible builds, every consumer gets
@@ -300,7 +454,19 @@ PKG_VERSION:=0.6.0_alpha4_pre19
 # them.
 # It drives the download URL/tarball name and the SHA-named build dirs below —
 # never the package version — so the two can differ legally.
-PKG_SOURCE_VERSION:=afc86b3fa41415b38ab870e16749181bcca4eb80
+# pre22 advances the pin to 8b9ba86e — module main TIP (0 commits behind
+# main), replacing the 74cd6f99 pin. Exactly ONE commit separates them: #638,
+# the :2121 owner-network exemption in
+# packaging/files/etc/nftables.d/30-backend-firewall.nft (see the pre22 block
+# above). PKG_SOURCE_TAG and the portal lock are deliberately left alone for the
+# reasons recorded in that block.
+# pre23 advances the pin to cec22228 -- module main TIP (0 commits behind main),
+# replacing the 8b9ba86e pin. FOUR commits separate them (#604, #612, #573, #649
+# -- subjects in the pre23 block above). PKG_SOURCE_TAG and the portal lock are
+# deliberately left alone: the tarball's own VERSION file is still
+# v0.6.0-alpha4 (Gate B enforces it on every run), and none of the four touches
+# portal content.
+PKG_SOURCE_VERSION:=2de7955ed5856bdd7f66cd43abec0f0d4fc34c00
 # PKG_SOURCE_TAG names the upstream release this commit belongs to. It is used
 # ONLY for the version string baked into the binaries, so a tester sees which
 # release the build came from instead of a bare SHA.
@@ -323,7 +489,7 @@ PKG_SOURCE_VERSION:=afc86b3fa41415b38ab870e16749181bcca4eb80
 # writes a setup marker no upstream build writes, and an unchanged marker sends
 # an upgrade down 99-tollgate-setup's same-version path where the new full-setup
 # work never runs.
-PKG_SOURCE_TAG:=v0.6.0-alpha4
+PKG_SOURCE_TAG:=v0.6.0-rc1
 # Short SHA for that human-facing version string; the full SHA stays in
 # GitCommit, which is what a bug report should quote.
 PKG_SOURCE_SHA7:=$(shell printf '%s' $(PKG_SOURCE_VERSION) | cut -c1-7)
@@ -393,8 +559,30 @@ PKG_SOURCE:=tollgate-module-basic-go-$(PKG_SOURCE_VERSION).tar.gz
 # WITHOUT the '?' requests `.../tar.gz/<sha>/<name>` and 404s, and the tag form
 # `.../tar.gz/v0.6.0-alpha4?` resolves 200 but hashes DIFFERENTLY
 # (28d63edb…), i.e. it is not the commit tarball this pin builds from.
+# pre22 re-calibrated on its pin move exactly as every earlier bump did:
+# replaying the identical construction for the OUTGOING pin (74cd6f99)
+# reproduced that pin's committed
+# 3f281ce2c9c28e8c8eaf02567115c62c7b3c7674246c407d45cdf9e97edcb57e exactly
+# (codeload reports 1486136 bytes for it), so the same construction for
+# 8b9ba86e yields
+# b439a433143f6261653d6de50e71658e7343366cf4306acdd3a221bb15d88271 — the value
+# committed below (codeload reports 1491187 bytes for it). A PKG_HASH is NEVER
+# carried across a pin move: Gate A below fails a moved pin whose hash was not
+# recalibrated, and this value comes from a fresh download of the NEW pin, not
+# from the outgoing one.
+# pre23 re-calibrated on its pin move exactly as every earlier bump did:
+# replaying the identical construction for the OUTGOING pin (8b9ba86e)
+# reproduced that pin's committed
+# b439a433143f6261653d6de50e71658e7343366cf4306acdd3a221bb15d88271 exactly
+# (codeload reports 1491187 bytes for it), so the same construction for
+# cec22228 yields
+# c7a7c85481a438e87219a3113bb1363f8d24a1acf25b810a21bcf0ac43bbe347 -- the value
+# committed below (codeload reports 1564227 bytes for it). A PKG_HASH is NEVER
+# carried across a pin move: Gate A below fails a moved pin whose hash was not
+# recalibrated, and this value comes from a fresh download of the NEW pin, not
+# from the outgoing one.
 PKG_SOURCE_URL:=https://codeload.github.com/OpenTollGate/tollgate-module-basic-go/tar.gz/$(PKG_SOURCE_VERSION)?
-PKG_HASH:=e449a2ece6af63c1fabaf544833bfecf4839598680c0f17aaf866da164d363e2
+PKG_HASH:=afdf4115906576f522c8cafe12699c255a4eb2a6442b918f40b2f90fee4d7bcd
 
 PKG_MAINTAINER:=Felix <felix@tollgate.me>
 PKG_LICENSE:=GPL-3.0-only

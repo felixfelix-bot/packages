@@ -14,6 +14,10 @@
 #      .apk/.ipk assets named deterministically:
 #        tollgate-wrt_<PKG_VERSION>_<arch>.apk / .ipk
 #      so the wizard can fetch the correct binary for the detected arch.
+#   3. (Gate H) The PR build MUST pin a RELEASED OpenWrt branch, never the
+#      mutable snapshots/ tree: a snapshot's sha256sums can rotate between the
+#      sums fetch and the SDK tarball download, failing the job for reasons
+#      unrelated to any PR (measured on PR #46, job aarch64_cortex-a72).
 #
 # Exit status: 0 = pass, 1 = fail.
 
@@ -133,6 +137,136 @@ if [ -n "$PR_WF" ]; then
     fi
 else
     fail "no vendored PR CI workflow always builds tollgate-wrt (PACKAGES=\"tollgate-wrt\")"
+fi
+
+
+# --- Gate H: the PR build pins an IMMUTABLE SDK release, never a snapshot -----
+# Measured 2026-10-01 on PR #46 (run 36842992536, job "Test aarch64_cortex-a72"):
+# the job fetched targets/bcm27xx/bcm2711/sha256sums at 09:30:57 and the 266 MB
+# SDK tarball finished at 09:42:31 -- 12 minutes later. Upstream rotates the
+# snapshots/ tree continuously, so the tarball no longer matched the sums that
+# had just been downloaded and `sha256sum -c` inside openwrt/gh-action-sdk@v11
+# failed with "1 computed checksum did NOT match". That is a property of a
+# MUTABLE tree, not of any PR: it can strike any run on any arch and costs a
+# full ~30-minute job (7 of 8 arch jobs passed on that run; only the one whose
+# SDK rotated mid-download died).
+#
+# The gate below pins the property that removes the race: the build branch must
+# be a RELEASED OpenWrt branch (releases/<version>/targets/<target>/sha256sums
+# and the SDK tarball it describes are immutable, so a verify can never race),
+# the pin must carry a fail-closed guard against the mutable names, and the
+# Build step must not be handed a `-master` snapshot ARCH.
+#
+# The negative control at the bottom mutates a copy back to `master` and
+# requires this check to REFUSE it -- without that, a check that always passes
+# would look identical to a check that works.
+sdk_pin_check() { # sdk_pin_check <workflow-file> ; rc 0 = pinned immutably
+    _f="$1"
+    _pin=$(grep -oE 'SDK_BRANCH="[^"]+"' "$_f" 2>/dev/null | head -n1 | sed 's/.*="//;s/"$//')
+    case "$_pin" in
+        openwrt-[0-9]*.[0-9]*) : ;;
+        "") echo "no SDK_BRANCH=\"openwrt-<major>.<minor>\" pin found (a mutable snapshot tree would be built against)"; return 1 ;;
+        *)  echo "SDK_BRANCH='$_pin' is not a released openwrt-<major>.<minor> branch"; return 1 ;;
+    esac
+    if ! grep -qE 'main\|master\|snapshot\*' "$_f"; then
+        echo "the pin has no fail-closed guard refusing master/main/snapshot*"
+        return 1
+    fi
+    if grep -qE 'ARCH: \$\{\{ matrix\.arch \}\}-master' "$_f"; then
+        echo "the Build step still receives the '-master' snapshot ARCH"
+        return 1
+    fi
+    return 0
+}
+
+PR_BUILD_WF="$ROOT/.github/workflows/multi-arch-test-build.yml"
+if [ ! -f "$PR_BUILD_WF" ]; then
+    fail "the vendored PR build workflow is missing: $PR_BUILD_WF"
+else
+    if _why=$(sdk_pin_check "$PR_BUILD_WF"); then
+        ok "the PR build is pinned to an immutable released SDK branch (no snapshot race)"
+    else
+        fail "the PR build can hit the SDK snapshot checksum race: $_why"
+    fi
+    _ctl=$(mktemp)
+    sed 's/^\( *SDK_BRANCH=\)"openwrt-[0-9.]*"/\1"master"/' "$PR_BUILD_WF" > "$_ctl"
+    if sdk_pin_check "$_ctl" >/dev/null 2>&1; then
+        fail "control: a workflow pinned to the mutable 'master' snapshot branch was ACCEPTED (the check is vacuous)"
+    else
+        ok "control: the check refuses a workflow pinned back to the mutable master snapshot branch"
+    fi
+    rm -f "$_ctl"
+fi
+
+# --- Gate F: the apk lane that was shipped without a WAN-less bundle ----------
+# (2026-10-01) The offline bundle is what lets a FRESH, WAN-less flash install
+# tollgate-wrt. The apk lane publishes mips_24kc (ath79-generic) as a real
+# per-arch row, so a mips_24kc router with no uplink had NO bundle and could not
+# resolve its dependency closure. The gap was invisible from the package matrix
+# alone: the apk lane and the bundle lane are SEPARATE tables in
+# release-assets.py (RELEASES vs OFFLINE_BUNDLES).
+#
+# The assertion is scoped to THIS arch on purpose. A bundle is a per-arch
+# dependency closure resolved against a pinned OpenWrt release, so "every
+# apk-lane arch has a bundle" is the right long-term property but not one this
+# change can claim -- the arches still without a bundle are REPORTED below
+# rather than asserted, so the test states the gap instead of hiding it.
+#
+# Both checks parse the tables, not the file text: grepping the Makefile or the
+# script for "mips_24kc\" \"ath79-generic\"" also matches the RELEASES table,
+# which is how a vacuous version of this gate passed while the bundle row was
+# absent.
+python3 - "$ROOT/.github/workflows/scripts/release-assets.py" > "$ROOT/.bundle-gate.$$" 2>&1 <<'PY'
+import json, subprocess, sys
+assets_py = sys.argv[1]
+def rows(*argv):
+    out = subprocess.run(["python3", assets_py, *argv], capture_output=True,
+                         text=True, check=True).stdout
+    return json.loads(out)["include"]
+apk_arches = sorted({r["arch"] for r in rows("matrix") if r["ext"] == "apk"})
+bundles = rows("offline-matrix")
+bundle_arches = sorted({r["arch"] for r in bundles})
+print("apk-lane arches:    %s" % " ".join(apk_arches))
+print("bundle-lane arches: %s" % " ".join(bundle_arches))
+mips = [r for r in bundles if r["arch"] == "mips_24kc"]
+if not mips:
+    print("FAIL mips_24kc has no OFFLINE_BUNDLES row (mips AR300M-class routers cannot install WAN-less)")
+    sys.exit(1)
+row = mips[0]
+if row["target"] != "ath79-generic":
+    print("FAIL the mips_24kc bundle row targets %r, not ath79-generic" % row["target"])
+    sys.exit(1)
+if not row["profile"].startswith("glinet_gl-ar300m"):
+    print("FAIL the mips_24kc bundle row names profile %r; expected a glinet_gl-ar300m* device profile "
+          "(the profile decides which base-image packages are assumed already present)" % row["profile"])
+    sys.exit(1)
+if row["ext"] != "apk" or row["release"] != "25.12.5":
+    print("FAIL the mips_24kc bundle row is release=%r ext=%r; the apk lane bundles are resolved against "
+          "the OpenWrt release the router runs and are apk-tools 3 only" % (row["release"], row["ext"]))
+    sys.exit(1)
+print("PASS mips_24kc bundle row: target=%s profile=%s release=%s ext=%s"
+      % (row["target"], row["profile"], row["release"], row["ext"]))
+still_missing = [a for a in apk_arches if a not in bundle_arches]
+print("NOTICE apk-lane arches still without a WAN-less bundle (not asserted by this gate): %s"
+      % (", ".join(still_missing) or "none"))
+PY
+BUNDLE_RC=$?
+sort -t' ' -k1 .bundle-gate.$$ 2>/dev/null | sed -n 's/^NOTICE /NOTICE: /p'
+if [ "$BUNDLE_RC" = 0 ]; then
+    ok "$(grep -m1 '^PASS ' .bundle-gate.$$ | sed 's/^PASS //')"
+    ok "every apk-lane arch's bundle coverage is accounted for (gaps reported, not hidden)"
+else
+    fail "$(grep -m1 '^FAIL ' .bundle-gate.$$ | sed 's/^FAIL //')"
+fi
+rm -f .bundle-gate.$$
+
+# The bundle carries the tollgate-wrt .apk for its arch, so the package matrix
+# entry must still exist or the bundle would ship nothing to install.
+if python3 "$ROOT/.github/workflows/scripts/release-assets.py" matrix \
+     | python3 -c 'import json,sys; d=json.load(sys.stdin)["include"]; sys.exit(0 if any(r["arch"]=="mips_24kc" and r["ext"]=="apk" for r in d) else 1)'; then
+    ok "the mips_24kc .apk is still built (the bundle ships it)"
+else
+    fail "the mips_24kc .apk is no longer in the build matrix (the bundle would ship nothing)"
 fi
 
 if [ "$FAIL" = 1 ]; then
