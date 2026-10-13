@@ -7,7 +7,7 @@ name: Publish per-arch tollgate-wrt release assets
 #   tollgate-wrt_<PKG_VERSION>_<arch>.apk
 #   tollgate-wrt_<PKG_VERSION>_<arch>.ipk
 #
-# e.g. tollgate-wrt_0.6.0_alpha1_aarch64_cortex-a53.apk
+# e.g. tollgate-wrt_0.6.0_alpha4_pre16_aarch64_cortex-a53.apk
 #
 # The wizard's tollgateArchAssets map (arch.go) points at these stable URLs,
 # so the correct binary is fetched for the detected router arch.
@@ -21,6 +21,41 @@ name: Publish per-arch tollgate-wrt release assets
 # artifact; a single publish job (needs: build) downloads them all and uploads
 # to the release. This avoids the race of several matrix jobs calling
 # softprops/action-gh-release concurrently.
+#
+# Offline dependency bundles (WAN-less install) — the ordering that matters:
+#   A freshly flashed router with NO uplink has no apk indexes, so the
+#   `DEPENDS:=+nodogsplash +jq` of the package cannot resolve. The
+#   `offline-bundle` job therefore builds, per arch,
+#   `tollgate-wrt-<PKG_VERSION>-<arch>-offline.tar.gz` (pkgs/ + MANIFEST.sha256
+#   + install-offline.sh + README.md) from the PUBLISHED apk indexes of the
+#   release it targets, and the publish job downloads those bundles BEFORE it
+#   generates and signs SHA256SUMS. That order is the point: a bundle built
+#   after signing is not covered by the signature and has no provenance. The
+#   bundle names are part of the expected asset set (release-assets.py), so the
+#   "Refuse to publish a release outside the expected asset set" gate below
+#   refuses a release whose bundle is missing, and the acceptance check at the
+#   end re-verifies the bundle from the public URL like every other asset.
+#
+# Release integrity (audit finding C3-05) — what the publish job guarantees:
+#   1. It publishes a SHA256SUMS manifest covering EVERY asset of the release,
+#      generated from the bytes it is about to upload (see
+#      .github/workflows/scripts/release-manifest.sh).
+#   2. It signs that manifest (SSHSIG, ed25519) with the key in the
+#      FEED_SIGNING_KEY secret, and fails if the key is absent — an unsigned
+#      manifest is refused. The public half is committed at
+#      .github/release-keys/release-signing.pub, so the digest is
+#      authenticated and no longer travels only with the bytes it describes.
+#   3. It fails if the staged asset set is not EXACTLY the expected set derived
+#      from .github/workflows/scripts/release-assets.py (same table that builds
+#      the matrix), and if the release already carries an unmanaged asset — a
+#      partially-published or hand-patched release cannot slip out unchecked.
+#   4. The release object stays a DRAFT until every package AND the manifest
+#      have been uploaded, then is published in one step. The ordering
+#      constraint behind C3-05 is therefore enforced: there is no window in
+#      which the tag resolves for an installer while SHA256SUMS 404s.
+#   5. After publishing, it re-downloads the manifest AND every asset from the
+#      public release URL and verifies the manifest against those bytes, so a
+#      green run is evidence about what the public URL actually serves.
 
 on:
   push:
@@ -32,27 +67,63 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: Derive the expected asset set
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.assets.outputs.matrix }}
+      offline_matrix: ${{ steps.assets.outputs.offline_matrix }}
+      expected: ${{ steps.assets.outputs.expected }}
+      version: ${{ steps.assets.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive the build matrix and the expected asset names
+        id: assets
+        env:
+          # The WAN-less bundle needs OFFLINE-BUNDLE-2, which has not landed upstream yet.
+          # Unset -> the release ships package assets only, and the signed manifest must cover
+          # exactly those. Set -> bundles are built and their hashes join the manifest.
+          OFFLINE_ENABLED: ${{ vars.OFFLINE_INSTALLER_REF != '' }}
+        run: |
+          set -euo pipefail
+          VERSION=$(grep '^PKG_VERSION:=' net/tollgate-wrt/Makefile | sed 's/^PKG_VERSION:=//')
+          echo "PKG_VERSION=$VERSION"
+          MATRIX=$(python3 .github/workflows/scripts/release-assets.py matrix)
+          OFFLINE_MATRIX=$(python3 .github/workflows/scripts/release-assets.py offline-matrix)
+          # A workflow command (:notice:/:warning:/:error:) must NEVER be echoed between a
+          # "name<<EOF" marker and its terminating EOF: everything in between becomes part of
+          # the output VALUE. A notice emitted there once entered the expected-asset list, so
+          # publish refused with "release is missing expected asset(s): ::notice::...".
+          if [ "${OFFLINE_ENABLED}" = "true" ]; then
+            EXPECT_ARGS="expected"
+          else
+            echo "::notice::OFFLINE_INSTALLER_REF is not set - OFFLINE-BUNDLE-2 has not landed in OpenTollGate/physical-router-test-automation, so no offline bundle is built and the signed manifest covers the package assets only."
+            EXPECT_ARGS="expected-packages"
+          fi
+          {
+            echo "matrix=$MATRIX"
+            echo "offline_matrix=$OFFLINE_MATRIX"
+            echo "version=$VERSION"
+            echo "expected<<EXPECTED_ASSETS_EOF"
+            python3 .github/workflows/scripts/release-assets.py "$EXPECT_ARGS" "$VERSION"
+            echo "EXPECTED_ASSETS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "--- offline bundle matrix"
+          echo "$OFFLINE_MATRIX"
+          echo "--- expected assets (as chosen)"
+          python3 .github/workflows/scripts/release-assets.py "$EXPECT_ARGS" "$VERSION"
+
   build:
     name: Build ${{ matrix.arch }} (${{ matrix.sdk }})
+    needs: preflight
     runs-on: ubuntu-latest
     strategy:
+      # fail-fast: false so one broken arch does not cancel the others; the
+      # publish job is gated on this job overall, so a failed arch still means
+      # NO release is published (and no partial manifest can be).
       fail-fast: false
-      matrix:
-        include:
-          - {arch: aarch64_cortex-a53, target: mediatek-filogic, sdk: master, ext: apk}
-          - {arch: aarch64_cortex-a53, target: mediatek-filogic, sdk: openwrt-24.10, ext: ipk}
-          - {arch: aarch64_cortex-a72, target: bcm27xx-bcm2711, sdk: master, ext: apk}
-          - {arch: aarch64_cortex-a72, target: bcm27xx-bcm2711, sdk: openwrt-24.10, ext: ipk}
-          - {arch: arm_cortex-a7, target: bcm27xx-bcm2709, sdk: master, ext: apk}
-          - {arch: arm_cortex-a7, target: bcm27xx-bcm2709, sdk: openwrt-24.10, ext: ipk}
-          - {arch: mipsel_24kc, target: mt7621, sdk: master, ext: apk}
-          - {arch: mipsel_24kc, target: mt7621, sdk: openwrt-24.10, ext: ipk}
-          - {arch: mips_24kc, target: ath79-generic, sdk: master, ext: apk}
-          - {arch: mips_24kc, target: ath79-generic, sdk: openwrt-24.10, ext: ipk}
-          - {arch: mips64_octeonplus, target: octeon-generic, sdk: master, ext: apk}
-          - {arch: mips64_octeonplus, target: octeon-generic, sdk: openwrt-24.10, ext: ipk}
-          - {arch: x86_64, target: x86-64, sdk: master, ext: apk}
-          - {arch: x86_64, target: x86-64, sdk: openwrt-24.10, ext: ipk}
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v7
@@ -106,22 +177,210 @@ jobs:
           path: tollgate-wrt_*_${{ matrix.arch }}.${{ matrix.ext }}
           if-no-files-found: error
 
-  publish:
-    name: Publish release assets
-    needs: build
+  offline-bundle:
+    name: Build offline dependency bundle (${{ matrix.arch }})
+    needs: [preflight, build]
     runs-on: ubuntu-latest
+    env:
+      OFFLINE_ENABLED: ${{ vars.OFFLINE_INSTALLER_REF != '' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.offline_matrix) }}
     steps:
+      # This job must RUN and SUCCEED even when the bundle is disabled: publish needs it, and a
+      # SKIPPED job skips publish entirely. It no-ops, declares why, and produces no artifact.
+      - name: Offline bundles enabled?
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "${OFFLINE_ENABLED}" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::OFFLINE_INSTALLER_REF is not set - OFFLINE-BUNDLE-2 has not landed in OpenTollGate/physical-router-test-automation, so no offline bundle is built and the signed manifest covers the package assets only."
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.gate.outputs.enabled == 'true'
+
+      - name: Download the tollgate-wrt package for ${{ matrix.arch }}
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: tollgate-wrt-${{ matrix.arch }}-${{ matrix.ext }}
+          path: staged
+
+      # The installer ships INSIDE the bundle and is NOT a single file: the
+      # driver also needs its router-side companion (install-router.sh) and the
+      # management keepalive seed, and it refuses to install without them. So the
+      # whole pinned scripts/offline/ directory is fetched at a COMMIT (never a
+      # branch) and the job fails closed when it cannot be fetched.
+      - name: Fetch the pinned offline installer (OFFLINE-BUNDLE-2)
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          INSTALLER_REPO: OpenTollGate/physical-router-test-automation
+          INSTALLER_PATH: scripts/offline
+          INSTALLER_REF: ${{ vars.OFFLINE_INSTALLER_REF || 'SET-ME-to-the-OFFLINE-BUNDLE-2-commit' }}
+        run: |
+          set -euo pipefail
+          echo "pinned installer ref: ${INSTALLER_REPO}@${INSTALLER_REF}:${INSTALLER_PATH}"
+          mkdir -p installer-repo && cd installer-repo
+          git init -q .
+          git remote add origin "https://github.com/${INSTALLER_REPO}.git"
+          if ! git fetch -q --depth 1 origin "${INSTALLER_REF}"; then
+            echo "::error::could not fetch ${INSTALLER_REF} from ${INSTALLER_REPO}"
+            echo "::error::the WAN-less bundle ships the ordered installer, so it cannot be built without it. Land OFFLINE-BUNDLE-2 in ${INSTALLER_REPO} and set the repository variable OFFLINE_INSTALLER_REF to its merge commit."
+            exit 1
+          fi
+          git checkout -q FETCH_HEAD -- "${INSTALLER_PATH}"
+          test -s "${INSTALLER_PATH}/install-offline.sh"
+          test -s "${INSTALLER_PATH}/install-router.sh"
+          test -s "${INSTALLER_PATH}/templates/99z-mgmt-keepalive"
+          for f in install-offline.sh install-router.sh templates/99z-mgmt-keepalive; do
+            echo "${f} sha256: $(sha256sum "${INSTALLER_PATH}/${f}" | awk '{print $1}')"
+          done
+          echo "installer commit: $(git rev-parse FETCH_HEAD)"
+
+      - name: Resolve, verify and package the offline dependency bundle
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          TOLLGATE_APK=$(find staged -maxdepth 2 -type f -name 'tollgate-wrt_*.apk' | head -n1)
+          if [ -z "$TOLLGATE_APK" ]; then
+            echo "::error::no tollgate-wrt .apk was staged for ${{ matrix.arch }}"
+            exit 1
+          fi
+          echo "tollgate package: $TOLLGATE_APK"
+          python3 .github/workflows/scripts/offline-bundle.py build \
+            --cache-dir "$RUNNER_TEMP/offline-cache" \
+            --release "${{ matrix.release }}" \
+            --arch "${{ matrix.arch }}" \
+            --target "${{ matrix.target }}" \
+            --profile "${{ matrix.profile }}" \
+            --pkg-version "${{ needs.preflight.outputs.version }}" \
+            --tollgate-apk "$TOLLGATE_APK" \
+            --installer-dir installer-repo/scripts/offline \
+            --out out
+          ls -lh out/
+
+      - name: Upload the offline bundle artifact
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: offline-bundle-${{ matrix.arch }}
+          path: out/*-offline.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets + SHA256SUMS
+    needs: [preflight, build, offline-bundle]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      EXPECTED_ASSETS: ${{ needs.preflight.outputs.expected }}
+    steps:
+      - uses: actions/checkout@v7
+
       - name: Download all per-arch assets
         uses: actions/download-artifact@v7
         with:
+          pattern: tollgate-wrt-*
+          path: assets
+          merge-multiple: true
+
+      # BEFORE the manifest is generated and signed: the signed SHA256SUMS is
+      # what gives the bundle its provenance, and it can only cover bytes that
+      # are already staged here. offline-bundle-test.sh asserts this ordering,
+      # including against a mutated copy of this file.
+      - name: Download the offline bundles
+        # Skipped when bundles are disabled: the artifact set is empty and download-artifact
+        # treats that as an error.
+        if: ${{ vars.OFFLINE_INSTALLER_REF != '' }}
+        uses: actions/download-artifact@v7
+        with:
+          pattern: offline-bundle-*
           path: assets
           merge-multiple: true
 
       - name: List staged assets
         run: ls -lh assets/
 
-      - name: Upload to release
+      - name: Refuse to publish a release outside the expected asset set
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$EXPECTED_ASSETS" > expected-assets.txt
+          # An asset already attached to this release that the matrix does not
+          # know about cannot be covered by a regenerated manifest. Stop, so a
+          # hand-patched release is repaired deliberately rather than silently
+          # re-checksummed.
+          existing=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' 2>/dev/null | grep -vE '^SHA256SUMS(\.sig)?$' || true)
+          if [ -n "$existing" ]; then
+            unexpected=$(comm -13 <(sort expected-assets.txt) <(printf '%s\n' "$existing" | sort) || true)
+            if [ -n "$unexpected" ]; then
+              echo "::error::release $TAG carries asset(s) outside the expected matrix:"
+              echo "$unexpected"
+              exit 1
+            fi
+          fi
+          echo "ok: no unmanaged assets on $TAG"
+
+      - name: Generate, verify and sign SHA256SUMS
+        env:
+          # OpenSSH ed25519 private key. Public half committed at
+          # .github/release-keys/release-signing.pub. Absent -> the script
+          # refuses to publish an unsigned manifest.
+          FEED_SIGNING_KEY: ${{ secrets.FEED_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          bash .github/workflows/scripts/release-manifest.sh assets expected-assets.txt
+          ls -l assets/SHA256SUMS assets/SHA256SUMS.sig
+
+      - name: Decide release visibility (draft until complete)
+        id: rel
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
+              echo "draft=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "draft=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::release $TAG already exists and is published — this is a repair run, so the release is visible while assets are replaced"
+            fi
+          else
+            echo "draft=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload assets + manifest to the release
         uses: softprops/action-gh-release@v2
         with:
+          # assets/* is expanded in sorted order, so the manifest files (which
+          # sort after "tollgate-wrt_*") are uploaded last: the manifest never
+          # exists before the bytes it describes.
           files: assets/*
           fail_on_unmatched_files: true
+          draft: ${{ steps.rel.outputs.draft == 'true' }}
+
+      - name: Publish the release (only once every asset + the manifest is attached)
+        if: steps.rel.outputs.draft == 'true'
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      - name: Verify what the public URL serves (the acceptance check)
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          mkdir -p verify && cd verify
+          curl -fsSL --retry 5 --retry-all-errors "$BASE/SHA256SUMS" -o SHA256SUMS
+          diff -u ../assets/SHA256SUMS SHA256SUMS
+          curl -fsSL --retry 5 --retry-all-errors "$BASE/SHA256SUMS.sig" -o SHA256SUMS.sig
+          ssh-keygen -Y verify -f ../.github/release-keys/allowed_signers \
+            -I release-signing@freedomtechfeed -n freedomtechfeed-release-manifest \
+            -s SHA256SUMS.sig < SHA256SUMS
+          # Every listed asset, fetched from the public URL, must hash to its
+          # manifest entry — this is the command the audit asked for.
+          while read -r _digest name; do
+            curl -fsSL --retry 5 --retry-all-errors "$BASE/$name" -o "$name"
+          done < SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          echo "published manifest verified against the published bytes for $TAG"
