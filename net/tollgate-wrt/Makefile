@@ -258,6 +258,8 @@ PKG_NAME:=tollgate-wrt
 #     < 0.6.0_alpha4_pre20 < 0.6.0_alpha4_pre21 < 0.6.0_alpha4_pre22
 #     < 0.6.0_alpha4_pre23 < 0.6.0_alpha4
 #     < 0.6.0_alpha4_pre23 < 0.6.0_rc1_pre24 < 0.6.0_rc1
+#     < 0.6.0_rc1_pre24 < 0.6.0_rc1_pre25 < 0.6.0_rc1
+#     < 0.6.0_rc1_pre25 < 0.6.0_rc1_pre26 < 0.6.0_rc1
 # PKG_SOURCE_TAG stays v0.6.0-alpha4: the module repo-root VERSION file at
 # PKG_SOURCE_VERSION is unchanged, and a repin that does not move the pin
 # must not move the tag either.
@@ -394,7 +396,66 @@ PKG_NAME:=tollgate-wrt
 #   docs(tests): the cloud-lab runbook is in main — drop the stale hedge (#677)
 #   fix(upstream): reseller renewals self-deadlock — bootstrap candidate check must not run under paymentMu (#629 follow-up) (#678)
 #   test(cloud-lab): #497 crash-window harness — SIGKILL between mint-signed and wallet-save (#676)
-PKG_VERSION:=0.6.0_rc1_pre24
+# ---------------------------------------------------------------------------
+# pre25 moves the pin and does nothing else -- the same shape as every repin before it:
+# the module moved, so PKG_SOURCE_VERSION and PKG_HASH move with it (PKG_HASH is
+# never recomputed without a pin move and never left stale across one), and no
+# other feed-side file changes.
+# The pin is now the merged module main tip cb4db7f, and the repo-root VERSION file
+# inside that tarball is v0.6.0-rc1, so PKG_SOURCE_TAG moves with it
+# (v0.6.0-rc1 -> v0.6.0-rc1) -- Gate B in test-pkg-tarball-parity.sh compares the two
+# and fails the build if they disagree.
+# Delta since 2de7955 (9 commit(s)):
+#   fix(merchant): the business-transaction record — an ambiguous or interrupted payment converges to service or spendable value (#502) (#700)
+#   docs(release): re-pin the internal test baseline — 09ea3af5, the #502 convergence included (#701)
+#   deps: security sweep — clears all 18 dependabot alerts (x/crypto critical chain) (#681)
+#   fix(discovery): recognize both brands' SSIDs so Net4sats can be an upstream — rebase of #618 (#682)
+#   test(vm-campaign): the x86-64 VM acceptance lane on ai-legion — first campaign green against the rc1 artifact (#704)
+#   docs(changelog): fragment for admin-UI URL contract docs (#698 follow-up) (#699)
+#   test(packaging): scope the rebrand gutter's literal ban to code surfaces — prose references are documented and exempt (#692)
+#   feat(config)!: entry_ui decides which UI owns :8080/:443 — the board takes the entry pair, LuCI moves to :8090/:8443 (#709)
+#   chore(packaging)!: pin the portal at the merged entry_ui revision (#714)
+# ---------------------------------------------------------------------------
+# pre26 moves the pin and does nothing else -- the same shape as every repin before it:
+# the module moved, so PKG_SOURCE_VERSION and PKG_HASH move with it (PKG_HASH is
+# never recomputed without a pin move and never left stale across one), and no
+# other feed-side file changes.
+# The pin is now the merged module main tip 4614ac2, and the repo-root VERSION file
+# inside that tarball is v0.6.0-rc1, so PKG_SOURCE_TAG moves with it
+# (v0.6.0-rc1 -> v0.6.0-rc1) -- Gate B in test-pkg-tarball-parity.sh compares the two
+# and fails the build if they disagree.
+# Delta since cb4db7f (7 commit(s)):
+#   docs(rc-guide): correct admin-UI port mapping for the entry_ui=board flip (#744)
+#   feat(cli): ui links — the router answer behind the ui_links rpcd method (#745)
+#   packaging: two pinned SDK eras — 25.12/apk (primary) + 24.10.8/ipk (installed base) (#710)
+#   fix(packaging): bcm2709 EXPECTED_ARCH is arm_cortex-a7_neon-vfpv4 — restore the two rc1 matrix rows (#717)
+#   fix(packaging): ipk versions need ~ pre-release ordering — raw '-rc1' sorts after the release and blocks the rc1→final upgrade (#738)
+#   fix(brands): one assembled brand registry for the whitelabel prefix — rebrand gutter green again (#739)
+#   fix(api): serve the :2121 discovery advertisement as application/json (#730)
+# ---------------------------------------------------------------------------
+# pre27 moves the module pin to the merged main tip b6f7aa74 and does nothing
+# else -- the same shape as every repin before it (the module moved, so
+# PKG_SOURCE_VERSION and PKG_HASH move with it; PKG_HASH is never recomputed
+# without a pin move and never left stale across one).
+# The repo-root VERSION file inside that tarball is still v0.6.0-rc1, so
+# PKG_SOURCE_TAG is UNCHANGED (Gate B in test-pkg-tarball-parity.sh compares the
+# two on every run).
+# Delta since 4614ac2 (the pre26 pin):
+#   fix(packaging): run the fail-closed admin gate LAST so the credential exists
+#     first (#838) -- the module-side half of the gate-last fix the FEED already
+#     ships (feed #57 stages the portal's 92 as 999). With this pin both the
+#     module's own recipe and the feed's agree that the credential (99) runs
+#     before the gate (999).
+#   feat(packaging): let the operator choose the admin password at install time
+#     (#82) -- carried into the feed by the 99-tollgate-setup the package
+#     installs from this tarball.
+#   fix(packaging): declare the CA bundle and state the manual-install trust
+#     chain (#828) -- the module-side mirror of feed #57.
+# This is the release-under-test for the apk-path board fix: pre26 shipped the
+# feed's admin gate as 92 (before 99), so a fresh hand-install left the board
+# off the air; feed #57 moved it to 999, and this pin brings the module's own
+# recipe into agreement.
+PKG_VERSION:=0.6.0_rc1_pre27
 # PKG_SOURCE_VERSION is the upstream source pin: an immutable 40-char COMMIT
 # SHA, NOT a tag and NOT a branch. A shared community feed must not chase a
 # moving branch (hash churn, unreproducible builds, every consumer gets
@@ -466,7 +527,7 @@ PKG_VERSION:=0.6.0_rc1_pre24
 # deliberately left alone: the tarball's own VERSION file is still
 # v0.6.0-alpha4 (Gate B enforces it on every run), and none of the four touches
 # portal content.
-PKG_SOURCE_VERSION:=2de7955ed5856bdd7f66cd43abec0f0d4fc34c00
+PKG_SOURCE_VERSION:=b6f7aa74d6262567e0f2a8baf2fa8e9502fa32c9
 # PKG_SOURCE_TAG names the upstream release this commit belongs to. It is used
 # ONLY for the version string baked into the binaries, so a tester sees which
 # release the build came from instead of a bare SHA.
@@ -582,7 +643,7 @@ PKG_SOURCE:=tollgate-module-basic-go-$(PKG_SOURCE_VERSION).tar.gz
 # recalibrated, and this value comes from a fresh download of the NEW pin, not
 # from the outgoing one.
 PKG_SOURCE_URL:=https://codeload.github.com/OpenTollGate/tollgate-module-basic-go/tar.gz/$(PKG_SOURCE_VERSION)?
-PKG_HASH:=afdf4115906576f522c8cafe12699c255a4eb2a6442b918f40b2f90fee4d7bcd
+PKG_HASH:=6bf16f638e9adcda7125ce7010eb02ae41bdedf28056a9b8b12682001e46f79e
 
 PKG_MAINTAINER:=Felix <felix@tollgate.me>
 PKG_LICENSE:=GPL-3.0-only
@@ -635,13 +696,26 @@ GO_PKG_LDFLAGS_X:= \
 include $(INCLUDE_DIR)/package.mk
 include ../../lang/golang/golang-package.mk
 
+# +ca-bundle is a RUNTIME dependency (TLS trust), not a build dependency: the
+# gateway talks to Cashu mints and Lightning over TLS using the system root pool
+# only, so an image with no CA store cannot verify a payment. The installer used
+# to paper over that by fixing the box first; installing the package alone has to
+# work, so the dependency is declared. (The failure that surfaced it is in this
+# commit's message, not here.)
+#   ca-bundle is Architecture: all and `Provides: ca-certs`, and is present on
+#   BOTH lanes -- 24.10 opkg index (ca-bundle 20260816-r1, aarch64_cortex-a53 and
+#   mips_24kc) and the 25.12 apk index -- so the solver resolves it either way.
+#   Naming ca-certificates instead would pin a single provider of ca-certs.
+# Mirrored by the module repo's own recipe (packaging/Makefile with
+# tests/packaging/apk-install-resolution_test.sh) in
+# OpenTollGate/tollgate-module-basic-go#828; that half is NOT in this diff.
 define Package/tollgate-wrt
 	SECTION:=net
 	CATEGORY:=Network
 	SUBMENU:=Captive Portals
 	TITLE:=TollGate - Cashu-powered WiFi Payment Gateway
 	URL:=https://tollgate.me
-	DEPENDS:=+nodogsplash +jq $(GO_ARCH_DEPENDS)
+	DEPENDS:=+nodogsplash +jq +ca-bundle $(GO_ARCH_DEPENDS)
 endef
 
 define Package/tollgate-wrt/description
@@ -773,9 +847,16 @@ wait_for_iface() {
 	return 1
 }
 
+# Run the three uci-defaults scripts the package just installed, in the SAME
+# order the module's own packaging does: captive-portal symlink (90), credential
+# setup (99), then the fail-closed admin gate LAST (999). The gate refuses to
+# serve the admin board unless it can find a credential, so it MUST run after
+# 99-tollgate-setup has created one -- running it first on a fresh flash fails
+# closed and locks the operator out. This list names INSTALLED paths, so it must
+# track 999-tollgate-admin-setup in Package/tollgate-wrt/install below.
 for script in /etc/uci-defaults/90-tollgate-captive-portal-symlink \
               /etc/uci-defaults/99-tollgate-setup \
-              /etc/uci-defaults/92-tollgate-admin-setup; do
+              /etc/uci-defaults/999-tollgate-admin-setup; do
 	if [ -x "$$script" ]; then
 		echo "Running $$script ..."
 		"$$script" || echo "Warning: $$script exited with code $$?" >&2
@@ -928,12 +1009,21 @@ define Package/tollgate-wrt/install
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
 	$(INSTALL_CONF) $(PKG_MAKEFILE_DIR)files/rpcd/tollgate_acl.json $(1)/usr/share/rpcd/acl.d/tollgate.json
 
-	$(INSTALL_BIN) $(PKG_MAKEFILE_DIR)files/uci-defaults/92-tollgate-admin-setup $(1)/etc/uci-defaults/
+	# GATE-LAST: the vendored source file keeps its name
+	# (files/uci-defaults/92-tollgate-admin-setup -- the drift guard and
+	# .github/scripts/check-vendor-drift.sh key on that path, so it must NOT be
+	# renamed), but it is INSTALLED as 999-tollgate-admin-setup. uci-defaults
+	# run in numeric order at boot, so installing the fail-closed admin gate as
+	# 92 made it run BEFORE 99-tollgate-setup (the credential script) and fail
+	# closed on a fresh flash, locking the operator out. 999 sorts after 99, so
+	# the credential exists first and the gate runs LAST -- the same order the
+	# postinst below uses, which means one writer wins in BOTH paths.
+	$(INSTALL_BIN) $(PKG_MAKEFILE_DIR)files/uci-defaults/92-tollgate-admin-setup $(1)/etc/uci-defaults/999-tollgate-admin-setup
 	# Substitute the BRAND webroot into the admin setup script (TollGate build ->
 	# /www/tollgate). The script reads __ADMIN_HOME__ and must never guess the
 	# brand by directory existence — a TollGate build must not serve a leftover
-	# net4sats webroot (and vice versa).
-	$(SED) 's|__ADMIN_HOME__|/www/tollgate|g' $(1)/etc/uci-defaults/92-tollgate-admin-setup
+	# net4sats webroot (and vice versa). Path tracks the 999 install name above.
+	$(SED) 's|__ADMIN_HOME__|/www/tollgate|g' $(1)/etc/uci-defaults/999-tollgate-admin-setup
 
 	$(INSTALL_DIR) $(1)/etc/crontabs
 

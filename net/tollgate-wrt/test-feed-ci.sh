@@ -14,10 +14,17 @@
 #      .apk/.ipk assets named deterministically:
 #        tollgate-wrt_<PKG_VERSION>_<arch>.apk / .ipk
 #      so the wizard can fetch the correct binary for the detected arch.
-#   3. (Gate H) The PR build MUST pin a RELEASED OpenWrt branch, never the
+#   3. (Gate L) Every tracked file under the package directory MUST be classified
+#      as "travels to upstream" or "fork-local" in UPSTREAM-MANIFEST.txt, so the
+#      upstream-mergeable subset stays mechanically extractable.
+#   4. (Gate H) The PR build MUST pin a RELEASED OpenWrt branch, never the
 #      mutable snapshots/ tree: a snapshot's sha256sums can rotate between the
 #      sums fetch and the SDK tarball download, failing the job for reasons
 #      unrelated to any PR (measured on PR #46, job aarch64_cortex-a72).
+#   5. (Gate M) Every failure message in the package harness (PKG_DIR/test-*.sh)
+#      MUST name its gate, so the harness replay wired into feed-gates.yml
+#      reports WHICH sub-gate broke instead of an anonymous "the harness failed".
+#      Other repo harnesses are out of scope.
 #
 # Exit status: 0 = pass, 1 = fail.
 
@@ -25,6 +32,7 @@ set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 WORKFLOW_DIR="$ROOT/.github/workflows"
 PKG_DIR="$ROOT/net/tollgate-wrt"
+REL_ASSETS="$WORKFLOW_DIR/scripts/release-assets.py"
 FAIL=0
 
 fail() {
@@ -48,7 +56,7 @@ for f in "$WORKFLOW_DIR"/*.yml; do
         ok "matrix override references aarch64_cortex-a53/mediatek-filogic in $(basename "$f")"
     fi
 done
-[ "$A53_FOUND" = 1 ] || fail "no workflow references aarch64_cortex-a53/mediatek-filogic (bench GL-MT6000 arch)"
+[ "$A53_FOUND" = 1 ] || fail "Gate A: no workflow references aarch64_cortex-a53/mediatek-filogic (bench GL-MT6000 arch)"
 
 # --- Gate B: release/tag-triggered per-arch asset build exists ---
 # A workflow must trigger on tags/releases and upload per-arch assets.
@@ -59,14 +67,14 @@ for f in "$WORKFLOW_DIR"/*.yml; do
         ok "release-triggered asset upload present in $(basename "$f")"
     fi
 done
-[ "$RELEASE_WF" = 1 ] || fail "no release/tag-triggered workflow uploads per-arch assets"
+[ "$RELEASE_WF" = 1 ] || fail "Gate B: no release/tag-triggered workflow uploads per-arch assets"
 
 # --- Gate C: deterministic asset naming ---
 # Asset name must be tollgate-wrt_<PKG_VERSION>_<arch>.apk/.ipk. The arch is
 # threaded through the matrix; the version comes from the Makefile. We assert
 # the naming pattern appears in the release workflow.
 PKG_VERSION=$(grep '^PKG_VERSION:=' "$PKG_DIR/Makefile" | sed 's/^PKG_VERSION:=//')
-[ -n "$PKG_VERSION" ] || fail "could not read PKG_VERSION from $PKG_DIR/Makefile"
+[ -n "$PKG_VERSION" ] || fail "Gate C: could not read PKG_VERSION from $PKG_DIR/Makefile"
 ok "PKG_VERSION=$PKG_VERSION"
 
 NAME_PATTERN_FOUND=0
@@ -76,67 +84,170 @@ for f in "$WORKFLOW_DIR"/*.yml; do
         ok "deterministic asset naming pattern present in $(basename "$f")"
     fi
 done
-[ "$NAME_PATTERN_FOUND" = 1 ] || fail "no workflow encodes the tollgate-wrt_<version>_<arch> asset naming pattern"
+[ "$NAME_PATTERN_FOUND" = 1 ] || fail "Gate C: no workflow encodes the tollgate-wrt_<version>_<arch> asset naming pattern"
 
-# --- Gate D: existing arches preserved ---
-# The change must NOT drop the existing mipsel_24kc / mips_24kc / x86_64
-# builds. Assert the matrix override (or default) still covers them.
-for arch in mipsel_24kc mips_24kc x86_64; do
-    FOUND=0
-    for f in "$WORKFLOW_DIR"/*.yml; do
-        if grep -q "$arch" "$f"; then
-            FOUND=1
-            ok "existing arch $arch preserved in $(basename "$f")"
-        fi
-    done
-    [ "$FOUND" = 1 ] || fail "existing arch $arch missing from all workflows"
-done
+# --- Gate D: the club device set stays SHIPPABLE ----------------------------
+# (2026-10-08, operator product call) The release lane ships exactly the
+# arches the club runs: GL-MT3000 and GL-MT6000 (both aarch64_cortex-a53 /
+# mediatek-filogic) and the GL.iNet AR300M family (mips_24kc /
+# ath79-generic). Every other row is PARKED, not deleted (see Gate K).
+#
+# This gate asserts the load-bearing half of that call: each club device
+# arch must keep BOTH its per-arch .apk release row AND its WAN-less
+# offline bundle -- a bundle whose matching package never publishes
+# advertises an install path that 404s. The negative control deletes the
+# a53 .apk row from a copy and requires the check to refuse it.
+club_ship_check() { # club_ship_check <release-assets.py> ; rc 0 = club set shippable
+    python3 - "$1" <<'PY'
+import json, subprocess, sys
+ra = sys.argv[1]
+rows = json.loads(subprocess.run([sys.executable, ra, "matrix"],
+                                 capture_output=True, text=True, check=True).stdout)["include"]
+bundles = json.loads(subprocess.run([sys.executable, ra, "offline-matrix"],
+                                    capture_output=True, text=True, check=True).stdout)["include"]
+CLUB = [("aarch64_cortex-a53", "mediatek-filogic", "GL-MT3000/GL-MT6000"),
+        ("mips_24kc", "ath79-generic", "GL.iNet AR300M")]
+rc = 0
+for arch, target, device in CLUB:
+    if not [r for r in rows if r["arch"] == arch and r["target"] == target and r["ext"] == "apk"]:
+        print(f"club arch {arch}/{target} ({device}) has no .apk release row -- cannot install")
+        rc = 1
+    if not any(b["arch"] == arch and b["target"] == target for b in bundles):
+        print(f"club arch {arch}/{target} ({device}) has no WAN-less offline bundle")
+        rc = 1
+sys.exit(rc)
+PY
+}
+if [ ! -f "$REL_ASSETS" ]; then
+    fail "Gate D: the release matrix script is missing: $REL_ASSETS"
+else
+    if _why=$(club_ship_check "$REL_ASSETS"); then
+        ok "the club device set (a53 = MT3000/MT6000, mips_24kc = AR300M) keeps its .apk row and offline bundle"
+    else
+        fail "Gate D: the club device set is no longer shippable: $_why"
+    fi
+    _ractl=$(mktemp --suffix=.py)
+    sed '/"aarch64_cortex-a53", "mediatek-filogic", "25\.12\.5", "apk"/d' "$REL_ASSETS" > "$_ractl"
+    if club_ship_check "$_ractl" >/dev/null 2>&1; then
+        fail "Gate D: control: the a53 .apk release row was removed and ACCEPTED (the check is vacuous)"
+    else
+        ok "control: the check refuses a club device arch whose .apk release row was removed"
+    fi
+    rm -f "$_ractl"
+fi
 
-# --- Gate E: PR CI always builds tollgate-wrt and runtime test is non-blocking ---
+# --- Gate E: PR CI always builds tollgate-wrt; the runtime lane SKIPS a missing
+#     rootfs image and keeps its ONE escape hatch scoped + dated ---------------
 # The PR CI is vendored (not the upstream reusable workflow) so that:
 #   1. It ALWAYS builds tollgate-wrt. The upstream "Determine changed packages"
 #      step only builds packages whose */Makefile changed; a workflow-only PR
 #      would fall back to generic test packages and give ZERO signal about
 #      tollgate-wrt.
-#   2. The runtime smoke test is non-blocking (continue-on-error: true) because
-#      upstream bug openwrt/actions-shared-workflows#130 makes it fail
-#      deterministically (kmods feed 404) even when the package built fine.
-#   3. The runtime-test container BUILD is also non-blocking: the
-#      openwrt/rootfs:<arch>-<branch> image does not exist for every arch
-#      (aarch64_cortex-a72, arm_cortex-a7, mips64_octeonplus have no rootfs
-#      image on Docker Hub), so `docker build` fails with "not found" for those
-#      arches even though the package built fine.
-# Assert the vendored workflow encodes all three, so a revert to the upstream
-# reusable workflow (which reintroduces these problems) is caught.
+#   2. A missing openwrt/rootfs:<arch>-<branch> image SKIPS instead of failing:
+#      a preflight step (id: runtime_image) probes the tag, publishes
+#      available=true|false via $GITHUB_OUTPUT, and BOTH docker steps are gated
+#      on that output. Measured 2026-10-09 (PR #57, run 37999768278): the
+#      aarch64_cortex-a53 job died at `FROM openwrt/rootfs:aarch64_cortex-
+#      a53-openwrt-25.12` with "not found" (exit 1) and the follow-on "Test via
+#      Docker container" died with exit 125 ("Unable to find image
+#      'test-container:latest' locally" -- the container was never built), while
+#      BOTH steps still carried continue-on-error. A lane whose every red is
+#      expected is a lane nobody reads, so a real runtime regression would have
+#      been indistinguishable from the known noise.
+#   3. The remaining continue-on-error is scoped to the ONE documented upstream
+#      bug, openwrt/actions-shared-workflows#130 (the rootfs image carries a
+#      kmods feed URL for the kernel it was built with; once the branch moves the
+#      old kmods dir 404s and `opkg update` in the container fails), and it sits
+#      on the runtime TEST step, never on the container BUILD.
+#   4. That escape hatch is DATED: the workflow must carry a REMINDER with an
+#      expiry date and the issue link, so it is removed once upstream fixes it.
+# Assert all four, so a revert to the upstream reusable workflow (which
+# reintroduces these problems) is caught. Three negative controls mutate one
+# property each (hatch moved to the container build / gate removed / reminder
+# deleted) and must all be REFUSED.
 PR_WF=""
 for f in "$WORKFLOW_DIR"/*.yml; do
     if grep -q 'name: Test and Build' "$f" && grep -q 'PACKAGES="tollgate-wrt"' "$f"; then
         PR_WF="$f"
     fi
 done
-if [ -n "$PR_WF" ]; then
-    ok "PR CI vendored and always builds tollgate-wrt in $(basename "$PR_WF")"
-    # The runtime-test container build step must be non-blocking. Scope the
-    # check to the "Build Docker container" step block (from its `- name:` line
-    # until the next `- name:` at the same indent) and require a
-    # `continue-on-error: true` inside it.
+
+runtime_lane_check() { # runtime_lane_check <workflow-file> ; rc 0 = de-red contract holds
+    _f="$1"
+    grep -q 'id: runtime_image' "$_f" \
+        || { echo "no rootfs-image availability preflight step (id: runtime_image)"; return 1; }
+    grep -q 'echo "available=\$available" >> "\$GITHUB_OUTPUT"' "$_f" \
+        || { echo "the preflight does not publish available=... via \$GITHUB_OUTPUT"; return 1; }
+    _gated=$(grep -c "steps.runtime_image.outputs.available == 'true'" "$_f")
+    [ "$_gated" -ge 2 ] \
+        || { echo "only $_gated docker step(s) gated on the preflight result (both must be)"; return 1; }
+    # Count real YAML keys only, not the comments that mention the string.
+    _coe=$(grep -cE '^[[:space:]]*continue-on-error:[[:space:]]*true' "$_f")
+    [ "$_coe" -eq 1 ] \
+        || { echo "$_coe continue-on-error escape hatch(es) in the workflow (exactly one is allowed: the #130-scoped runtime test)"; return 1; }
+    # Scope each check to its step block: from the `- name:` line until the next
+    # `- name:` line.
     if awk '
         /^[[:space:]]*- name: Build Docker container/ {inbuild=1; next}
         inbuild && /^[[:space:]]*- name:/ {inbuild=0}
-        inbuild && /continue-on-error: true/ {found=1}
+        inbuild && /^[[:space:]]*continue-on-error: true/ {found=1}
         END {exit !found}
-    ' "$PR_WF"; then
-        ok "runtime-test container build is non-blocking (continue-on-error) in $(basename "$PR_WF")"
-    else
-        fail "runtime-test container build in $(basename "$PR_WF") is not non-blocking (missing continue-on-error: true on 'Build Docker container')"
+    ' "$_f"; then
+        echo "the runtime-test container BUILD is non-blocking again (a missing image is the preflight's business now)"; return 1
     fi
-    if grep -q 'continue-on-error: true' "$PR_WF"; then
-        ok "runtime smoke test is non-blocking (continue-on-error) in $(basename "$PR_WF")"
+    awk '
+        /^[[:space:]]*- name: Test via Docker container/ {intest=1; next}
+        intest && /^[[:space:]]*- name:/ {intest=0}
+        intest && /^[[:space:]]*continue-on-error: true/ {found=1}
+        END {exit !found}
+    ' "$_f" \
+        || { echo "the runtime TEST lost its escaped hatch for the documented upstream bug (openwrt/actions-shared-workflows#130)"; return 1; }
+    grep -q 'actions-shared-workflows#130' "$_f" \
+        || { echo "no reference to the upstream bug the escape hatch is scoped to (#130)"; return 1; }
+    grep -qE 'REMINDER.*[0-9]{4}-[0-9]{2}-[0-9]{2}' "$_f" \
+        || { echo "no DATED reminder to remove the escape hatch once upstream fixes #130"; return 1; }
+    return 0
+}
+
+if [ -n "$PR_WF" ]; then
+    ok "PR CI vendored and always builds tollgate-wrt in $(basename "$PR_WF")"
+    if _why=$(runtime_lane_check "$PR_WF"); then
+        ok "runtime lane is de-redded: a missing image SKIPs, and the only escape hatch is the dated #130 one on the test step"
     else
-        fail "runtime smoke test in $(basename "$PR_WF") is not non-blocking (missing continue-on-error: true)"
+        fail "Gate E: the runtime lane can still go permanently RED / hide a real regression: $_why"
     fi
+    # Control A: moving the escape hatch onto the container BUILD (the previous
+    # shape) must be REFUSED.
+    _ectl=$(mktemp)
+    awk '/- name: Test via Docker container/ {intest=1}
+         !(intest && /^[[:space:]]*continue-on-error: true/)' "$PR_WF" \
+      | sed '/- name: Build Docker container/a\        continue-on-error: true' > "$_ectl"
+    if runtime_lane_check "$_ectl" >/dev/null 2>&1; then
+        fail "Gate E: control: an escape hatch moved onto the container BUILD was ACCEPTED (the check is vacuous)"
+    else
+        ok "control: the check refuses a runtime lane that is non-blocking on the container build"
+    fi
+    rm -f "$_ectl"
+    # Control B: docker steps that are not gated on the preflight must be REFUSED.
+    _ectl=$(mktemp)
+    sed "s/ && steps.runtime_image.outputs.available == 'true'//g" "$PR_WF" > "$_ectl"
+    if runtime_lane_check "$_ectl" >/dev/null 2>&1; then
+        fail "Gate E: control: docker steps with no image preflight gate were ACCEPTED (a missing image would go RED again)"
+    else
+        ok "control: the check refuses docker steps that are not gated on the image preflight"
+    fi
+    rm -f "$_ectl"
+    # Control C: an undated escape hatch (no removable reminder) must be REFUSED.
+    _ectl=$(mktemp)
+    grep -v 'REMINDER' "$PR_WF" > "$_ectl"
+    if runtime_lane_check "$_ectl" >/dev/null 2>&1; then
+        fail "Gate E: control: an escape hatch with no dated reminder was ACCEPTED (it could never be removed)"
+    else
+        ok "control: the check refuses an escape hatch that carries no dated reminder"
+    fi
+    rm -f "$_ectl"
 else
-    fail "no vendored PR CI workflow always builds tollgate-wrt (PACKAGES=\"tollgate-wrt\")"
+    fail "Gate E: no vendored PR CI workflow always builds tollgate-wrt (PACKAGES=\"tollgate-wrt\")"
 fi
 
 
@@ -164,9 +275,10 @@ sdk_pin_check() { # sdk_pin_check <workflow-file> ; rc 0 = pinned immutably
     _f="$1"
     _pin=$(grep -oE 'SDK_BRANCH="[^"]+"' "$_f" 2>/dev/null | head -n1 | sed 's/.*="//;s/"$//')
     case "$_pin" in
-        openwrt-[0-9]*.[0-9]*) : ;;
-        "") echo "no SDK_BRANCH=\"openwrt-<major>.<minor>\" pin found (a mutable snapshot tree would be built against)"; return 1 ;;
-        *)  echo "SDK_BRANCH='$_pin' is not a released openwrt-<major>.<minor> branch"; return 1 ;;
+        [0-9]*.[0-9]*.[0-9]*) : ;;
+        openwrt-*) echo "SDK_BRANCH='$_pin' is a BRANCH tag: ghcr branch-tag SDK images are snapshot-built and ship without the SDK, so every job still downloads the ~260 MB tarball (measured 2026-10-08, run 37839847702: 10,434 s on the apk lane). Pin the exact released version, e.g. 25.12.5"; return 1 ;;
+        "") echo "no SDK_BRANCH exact-version pin found (a mutable snapshot tree would be built against)"; return 1 ;;
+        *)  echo "SDK_BRANCH='$_pin' is not an exact released OpenWrt version (major.minor.patch)"; return 1 ;;
     esac
     if ! grep -qE 'main\|master\|snapshot\*' "$_f"; then
         echo "the pin has no fail-closed guard refusing master/main/snapshot*"
@@ -181,21 +293,191 @@ sdk_pin_check() { # sdk_pin_check <workflow-file> ; rc 0 = pinned immutably
 
 PR_BUILD_WF="$ROOT/.github/workflows/multi-arch-test-build.yml"
 if [ ! -f "$PR_BUILD_WF" ]; then
-    fail "the vendored PR build workflow is missing: $PR_BUILD_WF"
+    fail "Gate H: the vendored PR build workflow is missing: $PR_BUILD_WF"
 else
     if _why=$(sdk_pin_check "$PR_BUILD_WF"); then
-        ok "the PR build is pinned to an immutable released SDK branch (no snapshot race)"
+        ok "the PR build is pinned to an exact released SDK version (bundled-SDK image: no snapshot race, no per-job tarball download)"
     else
-        fail "the PR build can hit the SDK snapshot checksum race: $_why"
+        fail "Gate H: the PR build can hit the SDK snapshot checksum race: $_why"
     fi
     _ctl=$(mktemp)
-    sed 's/^\( *SDK_BRANCH=\)"openwrt-[0-9.]*"/\1"master"/' "$PR_BUILD_WF" > "$_ctl"
+    sed 's/^\( *SDK_BRANCH=\)"[0-9.]*"/\1"master"/' "$PR_BUILD_WF" > "$_ctl"
     if sdk_pin_check "$_ctl" >/dev/null 2>&1; then
-        fail "control: a workflow pinned to the mutable 'master' snapshot branch was ACCEPTED (the check is vacuous)"
+        fail "Gate H: control: a workflow pinned to the mutable 'master' snapshot branch was ACCEPTED (the check is vacuous)"
     else
         ok "control: the check refuses a workflow pinned back to the mutable master snapshot branch"
     fi
     rm -f "$_ctl"
+    _ctl=$(mktemp)
+    sed 's/^\( *SDK_BRANCH=\)"[0-9.]*"/\1"openwrt-25.12"/' "$PR_BUILD_WF" > "$_ctl"
+    if sdk_pin_check "$_ctl" >/dev/null 2>&1; then
+        fail "Gate H: control: a workflow pinned to the BRANCH tag 'openwrt-25.12' was ACCEPTED (branch-tag images are snapshot-built and SDK-less)"
+    else
+        ok "control: the check refuses a workflow pinned to the SDK-less branch tag 'openwrt-25.12'"
+    fi
+    rm -f "$_ctl"
+fi
+
+# --- Gate I: the RELEASE lane also pins released SDK branches, never snapshots --
+# (2026-10-08) Gate H guards the PR workflow, but the tag-triggered release
+# matrix (release-assets.py RELEASES) is a SEPARATE table, and its apk lane
+# still built against the mutable `master` snapshot while the PR lane was
+# pinned. Two measured costs on the pre26 tag (run 37816851786): every apk-lane
+# job rebuilt its dependency closure from source because the moved snapshot
+# invalidated the gh-action-sdk docker cache scope (openwrt/sdk-<arch>-master),
+# and the slowest lane spent 2597 s of a 2630 s job inside the SDK step with
+# the tollgate module itself compiling in the final ~60 s. A released branch
+# cannot race its sha256sums (Gate H rationale) and its cache scope stays
+# valid until the branch moves.
+#
+# Like Gate F, this parses the table via release-assets.py, not the file text.
+# The negative control mutates a copy back to `master` and requires the check
+# to refuse it.
+release_sdk_pin_check() { # release_sdk_pin_check <release-assets.py> ; rc 0 = all lanes released
+    python3 - "$1" <<'PY' >/dev/null 2>&1
+import json, re, subprocess, sys
+rows = json.loads(subprocess.run(
+    ["python3", sys.argv[1], "matrix"], capture_output=True, text=True, check=True).stdout)["include"]
+bad = sorted({r["sdk"] for r in rows
+              if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", r["sdk"])})
+sys.exit(1 if bad else 0)
+PY
+}
+REL_ASSETS="$WORKFLOW_DIR/scripts/release-assets.py"
+if [ ! -f "$REL_ASSETS" ]; then
+    fail "Gate I: the release matrix script is missing: $REL_ASSETS"
+else
+    if release_sdk_pin_check "$REL_ASSETS"; then
+        ok "every release-lane SDK is an exact released version (bundled-SDK image: no snapshot lane, no per-job tarball download)"
+    else
+        fail "Gate I: a release lane builds against a non-released SDK branch (mutable snapshot: checksum race + permanent cache miss; see Gate H)"
+    fi
+    _ctl=$(mktemp --suffix=.py)
+    sed 's/"25\.12\.5", "apk"/"master", "apk"/g' "$REL_ASSETS" > "$_ctl"
+    if release_sdk_pin_check "$_ctl" >/dev/null 2>&1; then
+        fail "Gate I: control: a release matrix pinned back to 'master' was ACCEPTED (the check is vacuous)"
+    else
+        ok "control: the check refuses a release matrix pinned back to the mutable master snapshot"
+    fi
+    rm -f "$_ctl"
+    _ctl=$(mktemp --suffix=.py)
+    sed 's/"25\.12\.5", "apk"/"openwrt-25.12", "apk"/g' "$REL_ASSETS" > "$_ctl"
+    if release_sdk_pin_check "$_ctl" >/dev/null 2>&1; then
+        fail "Gate I: control: a release matrix pinned to the BRANCH tag 'openwrt-25.12' was ACCEPTED (branch-tag images are snapshot-built and SDK-less)"
+    else
+        ok "control: the check refuses a release matrix pinned to the SDK-less branch tag 'openwrt-25.12'"
+    fi
+    rm -f "$_ctl"
+fi
+
+# --- Gate J: every release-lane arch keeps an active-or-parked PR row --------
+# (2026-10-08) The PR matrix trims compile coverage to the arches on real
+# hardware by PARKING rows (commented out, uncomment-to-restore) instead of
+# deleting them. Two things must hold:
+#   - (this gate) every arch the release lane SHIPS must still appear in the
+#     PR workflow as an ACTIVE row or a PARKED comment row, so the restore
+#     path is visible where you would restore it. Parking may not become
+#     "this arch's restore path silently disappears".
+#   - (Gate D) historically-shipped arches cannot leave the release matrix
+#     at all. Gate D + this gate together close the "park a row and drop the
+#     arch from RELEASES in the same change" hole: D refuses the drop, J
+#     refuses the vanished restore path.
+# Direction is deliberately one-way: the PR workflow also carries
+# aarch64_generic/armsr-armv8, a compile-coverage arch that has NEVER been a
+# release-lane row — requiring bidirectional equality would force deleting
+# its parked row, which is the opposite of the point.
+gate_j() { # gate_j <workflow> <release-assets.py> ; rc 0 = consistent
+    _wf="$1"; _ra="$2"
+    _rel=$(python3 "$_ra" matrix 2>/dev/null | python3 -c 'import json,sys; print(" ".join(sorted({r["arch"] for r in json.load(sys.stdin)["include"]})))' 2>/dev/null)
+    [ -n "$_rel" ] || { echo "cannot parse release matrix"; return 1; }
+    _wfarches=$(grep -oE '"arch": "[a-z0-9_-]+"' "$_wf" | sed 's/.*"arch": "//;s/"//' | sort -u | tr '\n' ' ')
+    _rc=0
+    for _a in $_rel; do
+        case " $_wfarches " in *" $_a "*) ;; *)
+            echo "release arch '$_a' has no active-or-parked row in the PR workflow (restore path not visible)"; _rc=1 ;; esac
+    done
+    return $_rc
+}
+
+if [ ! -f "$PR_BUILD_WF" ]; then
+    fail "Gate J: the vendored PR build workflow is missing: $PR_BUILD_WF"
+else
+    if _why=$(gate_j "$PR_BUILD_WF" "$REL_ASSETS"); then
+        ok "every release-lane arch keeps an active-or-parked PR row (parking cannot hide the restore path)"
+    else
+        fail "Gate J: PR matrix lost the restore path for a shipped arch: $_why"
+    fi
+    _wfctl=$(mktemp)
+    sed '/"arch": "mips_24kc"/d' "$PR_BUILD_WF" > "$_wfctl"
+    if gate_j "$_wfctl" "$REL_ASSETS" >/dev/null 2>&1; then
+        fail "Gate J: control: a shipped arch whose active-or-parked row was deleted from the PR workflow was ACCEPTED (the check is vacuous)"
+    else
+        ok "control: the check refuses a shipped arch with no active-or-parked PR row"
+    fi
+    rm -f "$_wfctl"
+fi
+
+# --- Gate K: parked release rows are still RESTORABLE rows --------------------
+# (2026-10-08) The release matrix parks rows the same way the PR matrix does:
+# commented out inside the list, exact row text preserved, uncomment to
+# restore. "Comment out, don't delete" is only true if the parked text is
+# still a well-formed row -- a mangled comment line looks identical to a
+# working park until someone tries to restore it. This gate parses every
+# commented row line out of release-assets.py and requires it to
+# ast.literal_eval into a 4-tuple, i.e. literally paste-back-able. The
+# negative control corrupts a parked row's quoting and must be refused.
+parked_rows_check() { # parked_rows_check <release-assets.py> ; rc 0 = all parked rows restorable
+    python3 - "$1" <<'PY'
+import ast, re, sys
+src = open(sys.argv[1]).read()
+# A parked row: a comment line whose body is a parenthesised literal
+# (quoted fields only -- prose comments such as "(arch, target, ...)" are
+# skipped because they carry no quotes).
+cand = [m.group(1) for m in re.finditer(r'^\s*#\s*(\(.*\))\s*,?\s*$', src, re.M)
+        if m.group(1).count('"') >= 4]
+if not cand:
+    print("no parked release rows found -- parking must keep rows as comments, not delete them")
+    sys.exit(1)
+rc = 0
+for text in cand:
+    try:
+        t = ast.literal_eval(text)
+    except Exception as exc:
+        print(f"parked row is not restorable Python: {text}  ({exc})")
+        rc = 1
+        continue
+    if not (isinstance(t, tuple) and len(t) == 4):
+        print(f"parked row is not a 4-tuple: {text}")
+        rc = 1
+sys.exit(rc)
+PY
+}
+if [ ! -f "$REL_ASSETS" ]; then
+    fail "Gate K: the release matrix script is missing: $REL_ASSETS"
+else
+    if _why=$(parked_rows_check "$REL_ASSETS"); then
+        ok "every parked release row is still a literal, paste-back-able 4-tuple"
+    else
+        fail "Gate K: a parked release row cannot be restored: $_why"
+    fi
+    # Control A: parking degraded into DELETION (no parked rows at all) must be refused.
+    _kctl=$(mktemp --suffix=.py)
+    sed '/^    # ("/d' "$REL_ASSETS" > "$_kctl"
+    if parked_rows_check "$_kctl" >/dev/null 2>&1; then
+        fail "Gate K: control: a matrix whose parked rows were DELETED was ACCEPTED (the check is vacuous)"
+    else
+        ok "control: the check refuses a matrix whose parked rows were deleted"
+    fi
+    rm -f "$_kctl"
+    # Control B: a corrupted parked row (no longer paste-back-able) must be refused.
+    _kctl=$(mktemp --suffix=.py)
+    sed '/^    # ("x86_64", "x86-64", "25\.12\.5", "apk"),$/s/"apk"),/"apk),/' "$REL_ASSETS" > "$_kctl"
+    if parked_rows_check "$_kctl" >/dev/null 2>&1; then
+        fail "Gate K: control: a corrupted (unrestorable) parked row was ACCEPTED (the check is vacuous)"
+    else
+        ok "control: the check refuses a corrupted parked row"
+    fi
+    rm -f "$_kctl"
 fi
 
 # --- Gate F: the apk lane that was shipped without a WAN-less bundle ----------
@@ -256,7 +538,7 @@ if [ "$BUNDLE_RC" = 0 ]; then
     ok "$(grep -m1 '^PASS ' .bundle-gate.$$ | sed 's/^PASS //')"
     ok "every apk-lane arch's bundle coverage is accounted for (gaps reported, not hidden)"
 else
-    fail "$(grep -m1 '^FAIL ' .bundle-gate.$$ | sed 's/^FAIL //')"
+    fail "Gate F: $(grep -m1 '^FAIL ' .bundle-gate.$$ | sed 's/^FAIL //')"
 fi
 rm -f .bundle-gate.$$
 
@@ -266,8 +548,50 @@ if python3 "$ROOT/.github/workflows/scripts/release-assets.py" matrix \
      | python3 -c 'import json,sys; d=json.load(sys.stdin)["include"]; sys.exit(0 if any(r["arch"]=="mips_24kc" and r["ext"]=="apk" for r in d) else 1)'; then
     ok "the mips_24kc .apk is still built (the bundle ships it)"
 else
-    fail "the mips_24kc .apk is no longer in the build matrix (the bundle would ship nothing)"
+    fail "Gate F: the mips_24kc .apk is no longer in the build matrix (the bundle would ship nothing)"
 fi
+
+# --- Gate L: the package ships ONLY bytes upstream can accept ----------------
+# Enforced by net/tollgate-wrt/test-upstream-fidelity.sh. That script asserts every
+# tracked file under net/tollgate-wrt/ is classified in UPSTREAM-MANIFEST.txt as
+# either "travels to openwrt/packages" or "fork-local forever", and that files/ and
+# the Makefile always travel. Read its header for why this gate is the thing that
+# lets ONE tree serve both a fast container-registry build and an upstream PR
+# without a second long-lived branch.
+if sh "$PKG_DIR/test-upstream-fidelity.sh"; then
+    ok "Gate L: the upstream/fork-local split is explicit and complete"
+else
+    fail "Gate L: test-upstream-fidelity.sh regressed -- the package no longer has an enforced upstream/fork-local split, so an upstream submission would be undefined"
+fi
+
+# --- Gate M: every failure message NAMES its gate ----------------------------
+# WHY: feed-gates.yml runs test-devendored.sh, which invokes THIS harness with its
+# output redirected to /dev/null and reports only "Gate E: test-feed-ci.sh
+# regressed". A second, if:failure() step re-runs the harness to recover the
+# detail -- and that replay is only useful if each fail() message says WHICH gate
+# broke. Without that, the next sub-gate to regress is anonymous and triage costs
+# a full local re-run.
+#
+# This gate keeps the naming honest as sub-gates are ADDED. It is the cheapest
+# possible check (a grep) and it goes red the moment someone writes a bare
+# fail(), so "which gate failed?" cannot quietly rot into "Gate E failed".
+# NOTE: grep is line-granular, so an unnamed fail() sharing a physical line with a
+# named one would be excluded with that line. No such line exists today.
+_gm_files=0
+_gm_named=0
+_gm_bad=0
+for _hm in "$PKG_DIR"/test-*.sh; do
+    [ -f "$_hm" ] || continue
+    _gm_files=$((_gm_files + 1))
+    _gm_named=$((_gm_named + $(grep -cE 'fail[[:space:]]+"Gate [A-Za-z0-9]+[.:]' "$_hm" 2>/dev/null || true)))
+    _unnamed=$(grep -nE 'fail[[:space:]]+"' "$_hm" 2>/dev/null | grep -vE 'fail[[:space:]]+"Gate [A-Za-z0-9]+[.:]' || true)
+    if [ -n "$_unnamed" ]; then
+        _gm_bad=$((_gm_bad + 1))
+        _n=$(printf '%s\n' "$_unnamed" | wc -l)
+        fail "Gate M: $(basename "$_hm") has $_n failure message(s) that do not name their gate, so a regression reports only 'the harness failed'. First: $(printf '%s\n' "$_unnamed" | head -1 | cut -d: -f2- | sed 's/^[[:space:]]*//' | cut -c1-100)"
+    fi
+done
+[ "$_gm_bad" = 0 ] && ok "Gate M: every failure message in the package harness names its gate ($_gm_named named across $_gm_files files)"
 
 if [ "$FAIL" = 1 ]; then
     echo "test-feed-ci: FAILED" >&2

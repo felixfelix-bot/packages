@@ -25,14 +25,51 @@ tollgate-wrt_0.6.0_alpha1_aarch64_cortex-a53.ipk
 
 ## Which arches are published
 
-The wizard can select these canonical tuples (see `arch.go`):
+The feed ships exactly the arches the club runs (operator call, 2026-10-08):
 
-| arch tuple            | target             | bench device        |
-|-----------------------|--------------------|---------------------|
-| `aarch64_cortex-a53`  | `mediatek-filogic` | GL-MT6000 (bench)   |
-| `mipsel_24kc`         | `mt7621`           | MT3000-class        |
-| `mips_24kc`           | `ath79-generic`    | GL-AR300M (tester)  |
-| `x86_64`              | `x86-64`           | gl-gate             |
+| arch tuple            | target             | club device                    |
+|-----------------------|--------------------|--------------------------------|
+| `aarch64_cortex-a53`  | `mediatek-filogic` | GL-MT3000, GL-MT6000 (bench)   |
+| `mips_24kc`           | `ath79-generic`    | GL.iNet AR300M family          |
+
+Both are published in **apk** (OpenWrt 25.12) and **ipk** (24.10) form, and both
+have a WAN-less offline bundle.
+
+### GL.iNet AR300M variants
+
+All four AR300M variants use package arch `mips_24kc`, but the flash layout
+determines the OpenWrt target:
+
+| variant | OpenWrt target |
+|---------|----------------|
+| `glinet_gl-ar300m-lite` | `ath79/generic` |
+| `glinet_gl-ar300m16` | `ath79/generic` |
+| `glinet_gl-ar300m-nor` | `ath79/nand` |
+| `glinet_gl-ar300m-nand` | `ath79/nand` |
+
+These are alternatives, not four simultaneously shippable rows: the shared
+arch would make the per-arch asset name collide. To identify a club unit,
+read `/tmp/sysinfo/board_name` on the router; `ubus call system board` also
+prints the model. If the club set moves to NAND, repoint Gate D's hardcoded
+`CLUB` list in `net/tollgate-wrt/test-feed-ci.sh` and the matching
+`OFFLINE_BUNDLES` row together, or the gates will assert the wrong target.
+
+### Parked arches
+
+`aarch64_cortex-a72`, `arm_cortex-a7`, `mipsel_24kc`, `mips64_octeonplus` and
+`x86_64` are **parked, not deleted**: their rows are comment lines inside
+`RELEASES` in `.github/workflows/scripts/release-assets.py`. Uncomment a row to
+restore it — the exact tuple/target/SDK/ext values are preserved so it is a
+one-line edit. Two gates keep this honest (`test-feed-ci.sh`): **Gate D** fails
+if a club arch loses its `.apk` row or its offline bundle, and **Gate K** fails
+if a parked row is no longer a paste-back-able 4-tuple. Gate J additionally
+requires every release-lane arch to keep an active-or-parked row in the PR
+workflow matrix.
+
+Note that the installer derives its download URL from the arch tuple rather than
+from a per-arch map (`internal/app/arch.go`, `feedAssetURL`), so parking a lane
+here makes a non-club router fail loudly at download time rather than installing
+a wrong-arch binary. Nothing in the installer needs to list the parked arches.
 
 ## Supported devices
 
@@ -175,11 +212,23 @@ than calling the openwrt shared workflow, for two reasons:
    shared workflow's default matrix does NOT include the bench GL-MT6000 arch,
    so without the override the bench router's arch never builds.
 
-The runtime smoke test in that workflow is deliberately **non-blocking**
-(`continue-on-error: true`): upstream `openwrt/actions-shared-workflows#130`
-makes it fail deterministically (kmods feed 404) even when the package built
-fine. The **Build** phase — which actually compiles `tollgate-wrt` — is the
-gate.
+The runtime lane in that workflow is **not** allowed to be permanently red:
+
+* A preflight step (`Check runtime-test rootfs image availability`) probes
+  `openwrt/rootfs:<arch>-<branch>` and both docker steps are gated on its
+  `available` output, so an arch upstream does not publish a rootfs image for
+  (measured 2026-10-09 UTC with `docker manifest inspect` and the Docker Hub tags
+  API: `x86_64`, `mips_24kc` and `aarch64_generic` exist; `aarch64_cortex-a53`,
+  `aarch64_cortex-a72`, `arm_cortex-a7`, `mipsel_24kc` and `mips64_octeonplus` do
+  not) **skips** the runtime steps instead of failing at `FROM … not found`.
+* The remaining `continue-on-error: true` is scoped to one documented upstream
+  bug: `openwrt/actions-shared-workflows#130`, whose rootfs images carry a kmods
+  feed URL for the kernel they were built with — once the branch moves, the old
+  kmods dir 404s and `opkg update` in the container fails. It sits on the runtime
+  **test** step only, carries a dated reminder, and is asserted (with negative
+  controls) by Gate E of `net/tollgate-wrt/test-feed-ci.sh`.
+
+The **Build** phase — which actually compiles `tollgate-wrt` — is the gate.
 
 #### The SDK branch is pinned to an immutable release (`openwrt-25.12`)
 
@@ -211,10 +260,14 @@ requires the check to refuse it — so the assertion cannot pass vacuously.
 Triggers on `v*` tags (and `workflow_dispatch`). For each arch it builds
 tollgate-wrt with two SDK images:
 
-- `master` → apk-tools package (`.apk`), OpenWrt 25+
+- `openwrt-25.12` → apk-tools package (`.apk`), OpenWrt 25.12+
 - `openwrt-24.10` → opkg package (`.ipk`), OpenWrt <=24.x
 
-This mirrors how the wizard selects `.apk` vs `.ipk` by package manager. Build
+This mirrors how the wizard selects `.apk` vs `.ipk` by package manager. The
+apk lane builds against the **released** `openwrt-25.12` branch, not the
+mutable `master` snapshot, for the same reason the PR lane pins its SDK
+(immutable sums + a cache scope that survives between tags; see Gate H/I in
+`net/tollgate-wrt/test-feed-ci.sh`). Build
 jobs run in parallel and upload their per-arch asset as a workflow artifact; a
 single `publish` job downloads them all and uploads to the release. This
 avoids the race of several matrix jobs calling `softprops/action-gh-release`
@@ -232,4 +285,9 @@ The harness asserts:
 2. A release/tag-triggered workflow uploads per-arch assets.
 3. The deterministic `tollgate-wrt_<version>_<arch>` naming pattern is
    encoded.
-4. The existing `mipsel_24kc` / `mips_24kc` / `x86_64` builds are preserved.
+4. (Gate D) The club device set stays shippable: each club arch
+   (`aarch64_cortex-a53` / `mediatek-filogic`, `mips_24kc` / `ath79-generic`)
+   keeps both its literal `.apk` release row and its WAN-less offline bundle.
+5. (Gate J) Every release-lane arch keeps an active-or-parked row in the PR
+   build workflow, so parking can never hide the restore path.
+6. (Gate K) Every parked release row is still a paste-back-able 4-tuple.

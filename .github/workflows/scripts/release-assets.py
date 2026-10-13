@@ -23,28 +23,77 @@ Usage:
 import json
 import sys
 
-# (arch, openwrt target, SDK branch, package extension)
+# (arch, openwrt target, exact SDK version, package extension)
 #
+# SDK values are EXACT released versions (major.minor.patch), never branch
+# tags: ghcr.io/openwrt/sdk branch-tag images (openwrt-25.12, openwrt-24.10)
+# are snapshot-built and ship WITHOUT the SDK -- gh-action-sdk's entrypoint
+# downloads the ~260 MB tarball from the OpenWrt mirrors in every job.
+# Measured on the pre26 release run 37839847702 (2026-10-08): the apk-lane
+# job (openwrt-25.12) spent 10,434 s on that download, the ipk-lane
+# (openwrt-24.10) 3 h 38 m -- the release took 262 min wall with tollgate
+# itself compiling in ~1 min per lane. Exact-version images (25.12.5,
+# 24.10.8) BUNDLE the SDK: no tarball download at all, no sha256sums race,
+# and the buildx gha-cache scope is stable per version. The pin is bumped by
+# hand when we adopt a new OpenWrt release; keep it aligned with
+# OFFLINE_BUNDLES below (both must name the release the routers run).
 # Two SDK images are built per arch:
-#   master        -> apk-tools package (.apk), OpenWrt 25+
-#   openwrt-24.10 -> opkg package (.ipk), OpenWrt <= 24.x
+#   25.12.x (apk-tools era) -> .apk package, OpenWrt 25.12+
+#   24.10.x (opkg era)      -> .ipk package, OpenWrt <=24.x
 # The wizard selects .apk vs .ipk by the package manager it finds on the router
 # (net4sats-wizard-go arch.go / tollgateArchAssets).
+#
+# The apk lane builds against the RELEASED 25.12 line, not the
+# mutable `master` snapshot tree. Same rationale as the PR lane's SDK pin
+# (multi-arch-test-build.yml, measured on PR #46): a snapshot rotates
+# continuously, so (1) a tarball can stop matching the sha256sums fetched
+# seconds earlier, and (2) the gh-action-sdk docker cache (scope
+# openwrt/sdk-<arch>-master) can never hit for long — the moved snapshot
+# forces the SDK image rebuild and the ~25-30 min dependency-closure source
+# rebuild on every tag. A released branch is immutable: sums cannot race and
+# the cache stays valid until the branch itself moves. Measured cost of the
+# snapshot lane on the pre26 tag (run 37816851786, 2026-10-08): every build
+# job rebuilt its closure from source; the slowest lane spent 2597 s of a
+# 2630 s job inside openwrt/gh-action-sdk, with the tollgate module itself
+# compiling in the final ~60 s. This also matches what ships: the routers run
+# 25.12.5 (see OFFLINE_BUNDLES below), the PR lane pins an exact 25.12.x, so the
+# release apk lane was the only lane still building against `master`.
+# (arch, 
+#  2026-10-08 (operator product call): the release lane ships exactly the
+# arches the club runs -- GL-MT3000 + GL-MT6000 (aarch64_cortex-a53 /
+# mediatek-filogic) and the GL.iNet AR300M family (mips_24kc /
+# ath79-generic for -lite/-16, or ath79-nand for -nor/-nand). Every other
+# row is PARKED, not deleted: uncomment a row
+# to restore it. Gates D and K in net/tollgate-wrt/test-feed-ci.sh keep
+# this honest (D: the club set keeps its .apk row + its offline bundle;
+# K: every parked row is still a paste-back-able 4-tuple). Keep the parked
+# block INSIDE the list so restoring a row is a one-line edit.
+#
+# Before restoring an arch here, also check the wizard's device list
+# (net4sats-wizard-go arch.go) -- a shipped asset with no wizard entry is
+# invisible, and a wizard entry with no asset 404s on install.
 RELEASES = [
-    ("aarch64_cortex-a53", "mediatek-filogic", "master", "apk"),
-    ("aarch64_cortex-a53", "mediatek-filogic", "openwrt-24.10", "ipk"),
-    ("aarch64_cortex-a72", "bcm27xx-bcm2711", "master", "apk"),
-    ("aarch64_cortex-a72", "bcm27xx-bcm2711", "openwrt-24.10", "ipk"),
-    ("arm_cortex-a7", "bcm27xx-bcm2709", "master", "apk"),
-    ("arm_cortex-a7", "bcm27xx-bcm2709", "openwrt-24.10", "ipk"),
-    ("mipsel_24kc", "mt7621", "master", "apk"),
-    ("mipsel_24kc", "mt7621", "openwrt-24.10", "ipk"),
-    ("mips_24kc", "ath79-generic", "master", "apk"),
-    ("mips_24kc", "ath79-generic", "openwrt-24.10", "ipk"),
-    ("mips64_octeonplus", "octeon-generic", "master", "apk"),
-    ("mips64_octeonplus", "octeon-generic", "openwrt-24.10", "ipk"),
-    ("x86_64", "x86-64", "master", "apk"),
-    ("x86_64", "x86-64", "openwrt-24.10", "ipk"),
+    # --- club devices: MT3000 + MT6000 (a53), AR300M family (mips_24kc) ---
+    ("aarch64_cortex-a53", "mediatek-filogic", "25.12.5", "apk"),
+    ("aarch64_cortex-a53", "mediatek-filogic", "24.10.8", "ipk"),
+    ("mips_24kc", "ath79-generic", "25.12.5", "apk"),
+    ("mips_24kc", "ath79-generic", "24.10.8", "ipk"),
+    # --- PARKED (uncomment to restore; no club device needs these) -------
+    # ("aarch64_cortex-a72", "bcm27xx-bcm2711", "25.12.5", "apk"),
+    # ("aarch64_cortex-a72", "bcm27xx-bcm2711", "24.10.8", "ipk"),
+    # ("arm_cortex-a7", "bcm27xx-bcm2709", "25.12.5", "apk"),
+    # ("arm_cortex-a7", "bcm27xx-bcm2709", "24.10.8", "ipk"),
+    # ("mipsel_24kc", "mt7621", "25.12.5", "apk"),
+    # ("mipsel_24kc", "mt7621", "24.10.8", "ipk"),
+    # ("mips64_octeonplus", "octeon-generic", "25.12.5", "apk"),
+    # ("mips64_octeonplus", "octeon-generic", "24.10.8", "ipk"),
+    # ("x86_64", "x86-64", "25.12.5", "apk"),
+    # ("x86_64", "x86-64", "24.10.8", "ipk"),
+    # AR300M alternatives, not additions: -lite/-16 use ath79/generic;
+    # -nor/-nand use ath79/nand. All four share mips_24kc, so both targets
+    # cannot be live at once: tollgate-wrt_<version>_mips_24kc.<ext> would collide.
+    # ("mips_24kc", "ath79-nand", "25.12.5", "apk"),
+    # ("mips_24kc", "ath79-nand", "24.10.8", "ipk"),
 ]
 
 # Offline dependency bundles (WAN-less install), one per arch that ships the
@@ -72,10 +121,15 @@ OFFLINE_BUNDLES = [
     #
     # `profile` is glinet_gl-ar300m-lite -- the smallest AR300M profile
     # (NOR/Lite, IMAGE_SIZE 16000k). Its device_packages is `kmod-usb2` alone;
-    # glinet_gl-ar300m16 is identical, and the NAND variant is not in the ath79
-    # package lane's profile set. Assuming the smallest profile bundles
+    # glinet_gl-ar300m16 is identical, and the NAND variants (-nor/-nand) live
+    # in the ath79/nand target's profile set, not this ath79-generic lane's
+    # (see the NAND note below). Assuming the smallest profile bundles
     # strictly MORE, which is the safe direction per the note above (the
     # bundle's packages are additive; an already-present package is skipped).
+    # If the club unit is a NAND variant, repoint this bundle together with the
+    # club release rows: target becomes ath79-nand and profile becomes a NAND
+    # profile such as glinet_gl-ar300m-nor. The closure is resolved against the
+    # target's indexes, so an ath79-generic bundle is not interchangeable.
     ("mips_24kc", "ath79-generic", "25.12.5", "glinet_gl-ar300m-lite", "apk"),
 ]
 
