@@ -1,0 +1,78 @@
+name: Vendor drift guard
+
+# The feed vendors a few SOURCE files owned by other repos (build-in-CI rule
+# #335: never commit BUILT assets). Guard it three ways:
+#   1. source-drift    — vendored 92 + rpcd (plugin, ACL) == the PINNED release
+#                        commit (vendor.lock.json -> portal_commit), NOT portal main
+#   2. bundle-rebuild  — rebuild the portal at the pinned commit and verify the
+#                        staged bundle byte-matches vendor.lock.json
+#
+# The built bundles (guest portal + admin SPA) are NOT vendored/committed
+# anymore: scripts/build-portal-bundle.sh stages them into files/ at CI time and
+# self-verifies against vendor.lock.json (the pinned-bytes manifest). So the
+# old bundle-lock job (which compared a committed tree) is gone, and
+# bundle-rebuild now runs the same authoritative builder the SDK build uses.
+#
+# build/ is gitignored in the portal repo, and the feed no longer carries a
+# committed copy, so a rebuild+differ against the lock is the only way to prove
+# the package ships exactly what the pin produces; it needs node + npm ci.
+#
+# CI-enforced ordering (do NOT invert): the portal repo merges FIRST, then this
+# feed re-pins — the lock's portal_commit and the vendored 92 + rpcd copies move
+# together in ONE commit, taken from that same SHA. vendor.lock.json's
+# portal_commit is the single source of truth; the guard reads it directly, so a
+# new portal commit does not turn this red until the feed re-pins to it.
+
+on:
+  push:
+    paths:
+      - 'net/tollgate-wrt/files/uci-defaults/92-tollgate-admin-setup'
+      - 'net/tollgate-wrt/files/rpcd/tollgate_acl.json'
+      - 'net/tollgate-wrt/files/rpcd/tollgate'
+      - 'net/tollgate-wrt/vendor.lock.json'
+      - 'net/tollgate-wrt/scripts/**'
+      - '.github/scripts/**'
+      - '.github/workflows/vendor-drift.yml'
+  pull_request:
+    paths:
+      - 'net/tollgate-wrt/files/uci-defaults/92-tollgate-admin-setup'
+      - 'net/tollgate-wrt/files/rpcd/tollgate_acl.json'
+      - 'net/tollgate-wrt/files/rpcd/tollgate'
+      - 'net/tollgate-wrt/vendor.lock.json'
+      - 'net/tollgate-wrt/scripts/**'
+      - '.github/scripts/**'
+      - '.github/workflows/vendor-drift.yml'
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendor-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-drift:
+    name: vendored 92 + rpcd == pinned portal commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh .github/scripts/check-vendor-drift.sh
+
+  bundle-rebuild:
+    name: rebuild portal@lock == vendor.lock.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build + stage + verify the portal bundle
+        run: |
+          set -euo pipefail
+          bash net/tollgate-wrt/scripts/build-portal-bundle.sh
+          echo "OK: portal bundle staged and byte-verified against vendor.lock.json"

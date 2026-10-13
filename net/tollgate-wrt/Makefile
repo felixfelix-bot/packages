@@ -2,23 +2,39 @@
 #
 # tollgate-wrt — Cashu-powered WiFi payment gateway for OpenWrt.
 #
+# Directory holding this recipe, captured BEFORE any include so
+# $(MAKEFILE_LIST)'s last word is still this file (rules.mk/package.mk append
+# many paths, e.g. the toolchain dir). Used to install the portal/admin
+# assets staged into files/ by scripts/build-portal-bundle.sh (build-in-CI) —
+# see the install recipe and files/ note below.
+PKG_MAKEFILE_DIR:=$(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+#
 # This feed package downloads the upstream source tarball and builds it with
 # golang-package.mk. The upstream repo (tollgate-module-basic-go) is NOT
 # modified — its Go source lives under src/ and uses a multi-module layout
 # (the main module at src/ plus sibling sub-modules wired via `replace`).
 #
 # The runtime files (init.d, uci-defaults, nftables.d, hotplug.d, man pages,
-# captive-portal site, usr/bin helpers, keep.d) are NOT vendored into this
-# feed. They are installed directly from the SOURCE TARBALL's packaging/files/
-# directory (see $(PKG_TARBALL_DIR) below), which ships OpenWrt-shaped files
-# because upstream releases its own .ipk from the same tree. Bumping
-# PKG_SOURCE_VERSION pulls in the matching runtime files automatically — there
-# is no separate files/ tree to keep in sync.
+# usr/bin helpers, keep.d) are NOT vendored into this feed. They are installed
+# directly from the SOURCE TARBALL's packaging/files/ directory (see
+# $(PKG_TARBALL_DIR) below), which ships OpenWrt-shaped files because upstream
+# releases its own .ipk from the same tree. Bumping PKG_SOURCE_VERSION pulls in
+# the matching runtime files automatically.
+#
+# The captive-portal + admin SPAs are built IN CI (build-in-CI rule, #335): a
+# workflow step runs net/tollgate-wrt/scripts/build-portal-bundle.sh, which
+# clones OpenTollGate/tollgate-captive-portal-site at the immutable commit
+# pinned in vendor.lock.json, runs `npm run build`, and stages the result under
+# files/tollgate-captive-portal-site/ and files/tollgate-admin/. The
+# gh-action-sdk build mounts the workspace as /feed, so the install recipe below
+# sees those staged files and ships them. No built asset is committed to this
+# repo. See docs/architecture/portal-bundle-ownership.md for the placement map
+# and net/tollgate-wrt/test-devendored.sh for the guard.
 #
 # Versioning: PKG_VERSION (apk-legal, underscore) names the package version
-# while PKG_SOURCE_VERSION (hyphen, upstream git tag) drives the download
-# URL/tarball name and the tag-named build dirs below — see the version block
-# for why the two are split.
+# while PKG_SOURCE_VERSION (the immutable upstream COMMIT SHA) drives the
+# download URL/tarball name and the SHA-named build dirs below — see the
+# version block for why they are split.
 #
 # One package, two binaries:
 #   - tollgate-wrt : the service, the module-root main package at src/main.go
@@ -36,17 +52,96 @@ PKG_NAME:=tollgate-wrt
 # apk (CONFIG_USE_APK, v24.10+), include/package-pack.mk feeds
 # "version:$(VERSION)" = "$(PKG_VERSION)-r$(PKG_RELEASE)" to `apk mkpkg`, and
 # apk-tools 3.x REJECTS hyphens ("package version is invalid", make Error 99).
-# apk pre-release convention uses '_' (or '~'): 0.6.0_alpha1-r1 is accepted.
-PKG_VERSION:=0.6.0_alpha1
-# PKG_SOURCE_VERSION is the upstream git tag (hyphenated, immutable on GitHub).
-# It drives ONLY the download naming/URL and the tag-named build dirs below —
+# apk pre-release convention uses '_' (or '~'): 0.6.0_alpha2_pre2-r1 is accepted.
+#
+# '_pre' + counter marks this as a PRE-TAG build of the v0.6.0-alpha2 tree: it
+# is the tip of main, built before the tag was cut. The counter distinguishes
+# successive main-tip builds of the SAME pre-tag tree: the previous pin
+# (089e876) shipped '_pre', this repin of a newer main tip (7cd1882) ships
+# '_pre2'. apk orders it strictly ABOVE the build it replaces and strictly
+# BELOW the eventual tag build —
+#     0.6.0_alpha2_pre < 0.6.0_alpha2_pre2 < 0.6.0_alpha2
+# — checked with `apk version -t` (ordering) and `apk version -c` (legality)
+# on apk-tools 3.0.5, so a device already running '_pre' is OFFERED this build,
+# and is then offered the real alpha2 once it is published. A tester can always
+# tell from the installed version which of the three they are running.
+# The counter MUST stay glued to the letters: '_pre.2' and '_pre_2' are both
+# rejected by apk-tools 3 ("package version is invalid", `apk version -c`
+# exit 1). The tag mirror stays derivable by the installer's rule (drop the
+# leading 'v', turn '-' into '_'): v0.6.0-alpha2-pre2 -> 0.6.0_alpha2_pre2.
+#
+# pre4 published a package whose captive portal actually works (vendored
+# assets); pre5 added the portal ENTRY cache-bust and the CLI main.version
+# injection. pre6 repins to the module commit that carries the cache-bust
+# UPSTREAM, so the feed-side 91-tollgate-portal-cachebust workaround is removed
+# (one mechanism, not two). pre9 adds the postinst service restart for in-place
+# upgrades and repins to the degraded-mode recovery pair (module #420/#421), so
+# a mint outage under traffic no longer leaves a router stuck degraded. The
+# release-publish workflow names assets by PKG_VERSION, so each change rides a
+# NEW version. pre10 hardened 92-tollgate-admin-setup, but its second commit
+# (a7ccc509) re-vendored the script back to the pre9 version — pre11 re-vendors
+# it from portal-site main (#44, a260172): the board is served over HTTP on
+# :8090 (the URL people type; HTTPS-only :8090 made http://<router>:8090/ dead
+# on the MT3000), with an OPT-IN HTTPS listener on :8443 when a cert/key pair
+# exists — one uhttpd instance cannot serve HTTP and HTTPS on the same port. It
+# keeps the brand-deterministic webroot (__ADMIN_HOME__), LuCI-proofing (delete
+# cgi/lua_prefix), :8090/:8443 exclusivity, and de-skin. pre11 also repins the
+# module (below) to #449 (netifd wireless-status Wi-Fi scan) + #458 (captive-LAN
+# access to :8090/:8443). pre12 re-vendors 92 from portal-site main (#45,
+# cdd5028) to re-assert the captive-LAN :8090/:8443 users_to_router allow on
+# EVERY install: the module's 99-tollgate-setup only applies it on a full setup
+# pass, which apk upgrades skip (upstream #459), so an upgrade could leave :8443
+# unreachable. pre13 re-vendors the portal + admin bundles (portal-site main
+# #47/#48 + #46) and the tollgate rpcd ACL (allowing /tmp/dhcp.leases read so the
+# board Devices page works on OpenWrt 25.x), and adds a cert-guarded
+# uhttpd.main.redirect_https so LuCI's http://:8080 stops warning about an
+# insecure password field. Module pin/hash unchanged.
+PKG_VERSION:=0.6.0_alpha2_pre13
+# PKG_SOURCE_VERSION is the upstream source pin: an immutable 40-char COMMIT
+# SHA, NOT a tag and NOT a branch. A shared community feed must not chase a
+# moving branch (hash churn, unreproducible builds, every consumer gets
+# untested tip), so we pin the commit. This is the tip of main; main's CHANGELOG
+# carries "[v0.6.0-alpha2]". pre6 advances the pin from 373770a to d0cb92f2
+# (module #404: the 90-tollgate-captive-portal-symlink cache-bust) so the feed
+# no longer needs its own 91-... workaround. pre9 advances the pin to 125f6a0
+# (module #421, the runtime-downgrade recovery — with #420, the MarkUnreachable
+# callback, already beneath it), replacing the interim 66c1f70 (#410) pin.
+# pre11 advances the pin to 170b4bd (module #449: the netifd wireless-status
+# Wi-Fi scan that replaces the uci-name iwinfo call; #458: captive-LAN access to
+# the admin board on :8090/:8443), replacing the 125f6a0 (#421) pin.
+# It drives the download URL/tarball name and the SHA-named build dirs below —
 # never the package version — so the two can differ legally.
-PKG_SOURCE_VERSION:=0.6.0-alpha1
+PKG_SOURCE_VERSION:=170b4bd861836469f21ae9813233bae674b266f1
+# PKG_SOURCE_TAG names the upstream release this commit belongs to. It is used
+# ONLY for the version string baked into the binaries, so a tester sees which
+# release the build came from instead of a bare SHA.
+PKG_SOURCE_TAG:=v0.6.0-alpha2
+# Short SHA for that human-facing version string; the full SHA stays in
+# GitCommit, which is what a bug report should quote.
+PKG_SOURCE_SHA7:=$(shell printf '%s' $(PKG_SOURCE_VERSION) | cut -c1-7)
+# PKG_RELEASE resets to 1 on a PKG_VERSION bump. The captive-portal and admin
+# SPAs are built IN CI (scripts/build-portal-bundle.sh) and staged into files/
+# for this recipe; upstream gitignores them and only produces them via `npm run
+# build`. Without the CI build the package ships splash.html referencing
+# /assets/*.js|css that were never built and the portal died with "disallowed
+# MIME type (text/html)" / NS_ERROR_CORRUPTED_CONTENT.
 PKG_RELEASE:=1
 
 PKG_SOURCE:=tollgate-module-basic-go-$(PKG_SOURCE_VERSION).tar.gz
-PKG_SOURCE_URL:=https://codeload.github.com/OpenTollGate/tollgate-module-basic-go/tar.gz/v$(PKG_SOURCE_VERSION)?
-PKG_HASH:=c0ca1b37cbccde8e46de8e42287185d322c648bb10ad317b3e496a136a0e35f7
+# The trailing '?' is load-bearing: OpenWrt's scripts/download.pl appends
+# "/$(PKG_SOURCE)" to PKG_SOURCE_URL before fetching, so the '?' turns that
+# suffix into a query string codeload ignores and leaves the COMMIT SHA as the
+# ref. Without it the request would be .../tar.gz/<sha>/<filename> and 404.
+# Verified: the exact URL download.pl constructs (with the '?' and the
+# PKG_SOURCE suffix) returns this tarball, sha256 == PKG_HASH below.
+# Re-calibrated for the 7cd1882 repin: replaying the identical construction for
+# the OUTGOING pin (089e876) reproduced the previously committed
+# ec27e23cc3f6676bd586b81f12d3be049207206358cadb6ce53d259873111d57 exactly,
+# which is what makes the method — and therefore the new hash below — trustworthy.
+# pre11 re-calibrated for the 170b4bd pin: the same construction
+# (codeload .../tar.gz/<sha>?) yields this tarball, sha256 == PKG_HASH below.
+PKG_SOURCE_URL:=https://codeload.github.com/OpenTollGate/tollgate-module-basic-go/tar.gz/$(PKG_SOURCE_VERSION)?
+PKG_HASH:=be7f40a6751420943ae1c547e2aafb74681dedf17839d0b4b6e3c9b4716125dd
 
 PKG_MAINTAINER:=Felix <felix@tollgate.me>
 PKG_LICENSE:=GPL-3.0-only
@@ -55,15 +150,18 @@ PKG_LICENSE_FILES:=LICENSE
 # PKG_BUILD_DIR points at the tarball's src/ directory: that is where the main
 # module's go.mod lives, so golang-package.mk operates on the module root and
 # the `replace ./xxx` directives resolve to sibling directories in the tree.
-# It stays tag-named (PKG_SOURCE_VERSION, hyphen) because the tarball extracts
-# to tollgate-module-basic-go-0.6.0-alpha1/ — it must NOT follow PKG_VERSION.
+# It stays SHA-named (PKG_SOURCE_VERSION) because a codeload tarball of a
+# COMMIT extracts to tollgate-module-basic-go-<full-sha>/ — it must NOT follow
+# PKG_VERSION. (A tag-based pin extracted to <repo>-<tag>/ instead; switching
+# the pin to a SHA moved this directory name with it, which is why it is
+# derived from PKG_SOURCE_VERSION rather than written out.)
 PKG_BUILD_DIR:=$(BUILD_DIR)/tollgate-module-basic-go-$(PKG_SOURCE_VERSION)/src
 
 # PKG_TARBALL_DIR is the tarball extraction root (parent of PKG_BUILD_DIR).
 # Build/Prepare extracts the WHOLE upstream tarball there, so packaging/files/
 # — the OpenWrt-shaped runtime files — survives as a sibling of src/ and can
 # be referenced by the install recipe below. Nothing is vendored into this
-# feed; the files ride along with the upstream release tarball. Tag-named for
+# feed; the files ride along with the upstream release tarball. SHA-named for
 # the same reason as PKG_BUILD_DIR (see above).
 PKG_TARBALL_DIR:=$(BUILD_DIR)/tollgate-module-basic-go-$(PKG_SOURCE_VERSION)
 
@@ -77,11 +175,14 @@ GO_PKG:=github.com/OpenTollGate/tollgate-module-basic-go
 GO_PKG_BUILD_PKG:=$(GO_PKG)
 
 # Version injection. src/cli is its own sub-module, so the import path keeps
-# the /src segment (matches how upstream's CI injects these values). Tied to
-# PKG_SOURCE_VERSION so the baked-in Version/GitCommit match the upstream tag
-# (v0.6.0-alpha1 / 0.6.0-alpha1) rather than the apk-legal package version.
+# the /src segment (matches how upstream's CI injects these values). Version is
+# built from PKG_SOURCE_TAG (the release this commit belongs to) plus the short
+# COMMIT SHA, so a tester running `tollgate version` sees both the release and
+# the exact commit — the SHA alone does not identify the release, and the
+# apk-legal PKG_VERSION ("0.6.0_alpha2_pre2") is not what upstream would tag.
+# GitCommit carries the full SHA.
 GO_PKG_LDFLAGS_X:= \
-	$(GO_PKG)/src/cli.Version=v$(PKG_SOURCE_VERSION) \
+	$(GO_PKG)/src/cli.Version=$(PKG_SOURCE_TAG)-g$(PKG_SOURCE_SHA7) \
 	$(GO_PKG)/src/cli.GitCommit=$(PKG_SOURCE_VERSION) \
 	$(GO_PKG)/src/cli.BuildTime=$(SOURCE_DATE_EPOCH)
 
@@ -154,13 +255,15 @@ endef
 # environment set up by GoPackage/Build/Compile does NOT carry over to the
 # second recipe line. We must re-establish it via $(GO_PKG_VARS), which adds
 # `go` to PATH and exports GOOS/GOARCH/GOARM/GOMIPS/CGO_ENABLED/CC/GOCACHE/
-# GOMODCACHE — exactly what the framework uses. The -X ldflags are harmless
-# no-ops for the CLI module (it does not contain those symbols).
+# GOMODCACHE — exactly what the framework uses. The src/cli -X symbols are
+# harmless no-ops for the CLI module (it does not contain them); the CLI's OWN
+# version is the main-package `main.version`, so it is injected explicitly
+# below (without it, `tollgate --version` reports the "dev" sentinel).
 define Build/Compile
 	$(call GoPackage/Build/Compile)
 	cd $(PKG_BUILD_DIR)/cmd/tollgate-cli && \
 		$(GO_PKG_VARS) go build -trimpath \
-			-ldflags "$(GO_PKG_LDFLAGS_X:%=-X %)" \
+			-ldflags "$(GO_PKG_LDFLAGS_X:%=-X %) -X main.version=$(PKG_SOURCE_TAG)-g$(PKG_SOURCE_SHA7)" \
 			-o $(GO_PKG_BUILD_BIN_DIR)/tollgate-cli .
 endef
 
@@ -200,7 +303,8 @@ define Package/tollgate-wrt/postinst
 # Run the oneshot UCI defaults immediately so an install on a running router
 # takes effect without waiting for the next boot, then enable the service.
 for script in /etc/uci-defaults/90-tollgate-captive-portal-symlink \
-              /etc/uci-defaults/99-tollgate-setup; do
+              /etc/uci-defaults/99-tollgate-setup \
+              /etc/uci-defaults/92-tollgate-admin-setup; do
 	if [ -x "$$script" ]; then
 		"$$script" || echo "Warning: $$script exited with code $$?" >&2
 	fi
@@ -208,15 +312,24 @@ done
 
 if [ -x /etc/init.d/tollgate-wrt ]; then
 	/etc/init.d/tollgate-wrt enable 2>/dev/null || true
+	# Restart so an in-place apk/opkg upgrade runs the new binary immediately;
+	# otherwise the running daemon keeps the old process until the next reboot.
+	/etc/init.d/tollgate-wrt restart 2>/dev/null || true
 fi
 
 exit 0
 endef
 
 # Runtime files are installed from the upstream source tarball's
-# packaging/files/ directory (see PKG_TARBALL_DIR above), NOT from a vendored
-# copy checked into this feed. The binaries install lines use
-# $(GO_PKG_BUILD_BIN_DIR) and stay unchanged.
+# packaging/files/ directory (see PKG_TARBALL_DIR above); the binaries install
+# lines use $(GO_PKG_BUILD_BIN_DIR) and stay unchanged.
+#
+# The captive portal + admin SPAs are staged under this repo's files/ by the
+# CI build (scripts/build-portal-bundle.sh, build-in-CI rule #335), so the
+# install lines below consume what CI produced. They are NOT vendored/committed.
+# welcome.html is MODULE-owned (the portal repo's `npm run build` never emits
+# it), so it ships from the module source tarball -- byte-identical in both
+# repos today, and any future change originates upstream in the module.
 define Package/tollgate-wrt/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(GO_PKG_BUILD_BIN_DIR)/tollgate-module-basic-go $(1)/usr/bin/tollgate-wrt
@@ -228,6 +341,21 @@ define Package/tollgate-wrt/install
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) $(PKG_TARBALL_DIR)/packaging/files/etc/uci-defaults/90-tollgate-captive-portal-symlink $(1)/etc/uci-defaults/
 	$(INSTALL_BIN) $(PKG_TARBALL_DIR)/packaging/files/etc/uci-defaults/99-tollgate-setup $(1)/etc/uci-defaults/
+	# 99-tollgate-setup ships with a literal __TOLLGATE_VERSION__ placeholder in
+	# SETUP_VERSION= and MUST be substituted at install time. Both of upstream's
+	# own packaging paths do exactly this (packaging/Makefile substitutes
+	# $(TOLLGATE_DISPLAY_VERSION), packaging/local-build-ipk.sh substitutes
+	# $PKG_VERSION), and upstream's script only falls back to guessing when the
+	# placeholder is still present — a fallback that reads /usr/lib/opkg/status,
+	# which does not exist on apk-based (OpenWrt 25.x) systems, so an
+	# unsubstituted file would make every router write SETUP_VERSION
+	# "unsubstituted" into /etc/tollgate-setup-done. The script re-runs full
+	# setup when that marker changes, so a wrong value silently breaks the
+	# version-bump re-setup path.
+	# The substituted value is the repo-root VERSION file's content
+	# (PKG_SOURCE_TAG), matching upstream's own builds so the marker is
+	# identical when the real tag build lands.
+	$(SED) 's|__TOLLGATE_VERSION__|$(PKG_SOURCE_TAG)|g' $(1)/etc/uci-defaults/99-tollgate-setup
 
 	$(INSTALL_DIR) $(1)/etc/nftables.d
 	$(INSTALL_DATA) $(PKG_TARBALL_DIR)/packaging/files/etc/nftables.d/20-nds-enforce.nft $(1)/etc/nftables.d/
@@ -250,7 +378,31 @@ define Package/tollgate-wrt/install
 	$(INSTALL_DIR) $(1)/etc/tollgate/ecash
 
 	$(INSTALL_DIR) $(1)/etc/tollgate/tollgate-captive-portal-site
-	$(CP) $(PKG_TARBALL_DIR)/packaging/files/tollgate-captive-portal-site/. $(1)/etc/tollgate/tollgate-captive-portal-site/
+	# The guest portal + admin SPAs are staged into files/ by scripts/build-portal-bundle.sh
+	# (build-in-CI rule #335) and consumed by the $(CP) below. welcome.html is MODULE-owned
+	# (the portal build never emits it) and comes from the source tarball.
+	$(CP) $(PKG_MAKEFILE_DIR)files/tollgate-captive-portal-site/. $(1)/etc/tollgate/tollgate-captive-portal-site/
+	$(INSTALL_DATA) $(PKG_TARBALL_DIR)/packaging/files/tollgate-captive-portal-site/welcome.html $(1)/etc/tollgate/tollgate-captive-portal-site/
+
+	# Admin board (Preact SPA) served at the ROOT of the dedicated uhttpd
+	# instance on :8090, from its brand webroot (/www/tollgate, or
+	# /www/net4sats for net4sats builds); it talks to the tollgate ubus
+	# object provided by the rpcd plugin below.
+	$(INSTALL_DIR) $(1)/www/tollgate
+	$(CP) $(PKG_MAKEFILE_DIR)files/tollgate-admin/. $(1)/www/tollgate/
+
+	$(INSTALL_DIR) $(1)/usr/libexec/rpcd
+	$(INSTALL_BIN) $(PKG_MAKEFILE_DIR)files/rpcd/tollgate $(1)/usr/libexec/rpcd/tollgate
+
+	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
+	$(INSTALL_CONF) $(PKG_MAKEFILE_DIR)files/rpcd/tollgate_acl.json $(1)/usr/share/rpcd/acl.d/tollgate.json
+
+	$(INSTALL_BIN) $(PKG_MAKEFILE_DIR)files/uci-defaults/92-tollgate-admin-setup $(1)/etc/uci-defaults/
+	# Substitute the BRAND webroot into the admin setup script (TollGate build ->
+	# /www/tollgate). The script reads __ADMIN_HOME__ and must never guess the
+	# brand by directory existence — a TollGate build must not serve a leftover
+	# net4sats webroot (and vice versa).
+	$(SED) 's|__ADMIN_HOME__|/www/tollgate|g' $(1)/etc/uci-defaults/92-tollgate-admin-setup
 
 	$(INSTALL_DIR) $(1)/etc/crontabs
 
