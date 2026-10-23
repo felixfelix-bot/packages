@@ -52,6 +52,22 @@ name: Test and Build
 
 on:
   pull_request:
+    # PATH HYGIENE (measured 2026-10-20, run 39404946887): a README-only PR
+    # (#91, one file under net/tollgate-wrt/) spawned the FULL 8-job SDK
+    # matrix -- ~31 min/job, the Build step alone measured at ~1200 s (see
+    # change #4 below) -- for zero signal: nothing a docs PR changes reaches
+    # a compiler. ~4 runner-hours per docs push, at the account's runner cap
+    # (the same cap the 160-minute stale-run incident fought). Docs-only
+    # changes skip this lane entirely; the cheap always-on PR lanes
+    # (feed-gates, tarball parity, build-contract fence) still run on every
+    # PR, and any PR that also touches code gets the full matrix as before.
+    # This deliberately does NOT revisit the widened-matrix decision
+    # (2026-10-15) or the always-build-tollgate rationale (change #1):
+    # workflow/recipe PRs still build the package; markdown PRs build
+    # nothing because there is nothing to build.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 
 # Upstream parity: this stanza is verbatim from
 # openwrt/actions-shared-workflows/.github/workflows/multi-arch-test-build.yml.
@@ -89,13 +105,15 @@ jobs:
       # net/tollgate-wrt/test-feed-ci.sh Gate J enforces that a parked arch
       # is always still shipped by the release lane -- parking can never
       # become "this arch silently vanishes".
-      #   {"arch": "aarch64_cortex-a72", "target": "bcm27xx-bcm2711", "runtime_test": true},
       #   {"arch": "aarch64_generic", "target": "armsr-armv8", "runtime_test": true},
-      #   {"arch": "arm_cortex-a7", "target": "bcm27xx-bcm2709", "runtime_test": true},
-      #   {"arch": "mipsel_24kc", "target": "mt7621", "runtime_test": false},
-      #   {"arch": "mips64_octeonplus", "target": "octeon-generic", "runtime_test": true},
-      #   {"arch": "mips_24kc", "target": "ath79-nand", "runtime_test": true},
       # ------------------------------------------------------------------
+      # WIDENED 2026-10-15: aarch64_cortex-a72, arm_cortex-a7, mipsel_24kc and
+      # mips64_octeonplus are ACTIVE again (release-assets.py RELEASES), so the
+      # review club can test against a wide range of routers. aarch64_generic is
+      # still parked (a compile-coverage arch that has never been a release row).
+      # mips_24kc/ath79-nand is ACTIVE as of 2026-10-15 (card t2):
+      # target-qualified asset names (Option A) removed the collision with the
+      # ath79-generic row.
       # ACTIVE rows. DATED NOTE (2026-10-10, from the review of #59):
       # aarch64_cortex-a53 / mediatek-filogic is the GL-MT6000 BENCH arch and an
       # ACTIVE row here, but upstream does NOT publish
@@ -116,7 +134,12 @@ jobs:
       matrix: >-
         ${{ fromJSON('{"include": [
           {"arch": "aarch64_cortex-a53", "target": "mediatek-filogic", "runtime_test": true},
+          {"arch": "aarch64_cortex-a72", "target": "bcm27xx-bcm2711", "runtime_test": true},
+          {"arch": "arm_cortex-a7_neon-vfpv4", "target": "bcm27xx-bcm2709", "runtime_test": true},
           {"arch": "mips_24kc", "target": "ath79-generic", "runtime_test": true},
+          {"arch": "mips_24kc", "target": "ath79-nand", "runtime_test": true},
+          {"arch": "mipsel_24kc", "target": "ramips-mt7621", "runtime_test": false},
+          {"arch": "mips64_octeonplus", "target": "octeon-generic", "runtime_test": true},
           {"arch": "x86_64", "target": "x86-64", "runtime_test": true}
         ]}')}}
 
@@ -213,6 +236,13 @@ jobs:
         uses: openwrt/gh-action-sdk@v11
         env:
           ARCH: ${{ matrix.arch }}-${{ env.BRANCH }}
+          # OPT-IN prebaked builder image (#60 / fast-builds). gh-action-sdk
+          # builds its wrapper FROM `$CONTAINER:$ARCH`; the action's build-args
+          # pass CONTAINER from this env. Unset the repo variable -> stock
+          # ghcr.io/openwrt/sdk (behaviour unchanged). Set TOLLGATE_SDK_IMAGE ->
+          # the pre-warmed image from build-tollgate-sdk-image.yml. See
+          # docs/fast-builds.md.
+          CONTAINER: ${{ vars.TOLLGATE_SDK_IMAGE || 'ghcr.io/openwrt/sdk' }}
           FEEDNAME: packages_ci
           INDEX: 1
           V: s
@@ -430,6 +460,10 @@ jobs:
       # exists. Gate E of net/tollgate-wrt/test-feed-ci.sh asserts the scope of
       # this hatch and the presence of this reminder, so the removal is a visible
       # change rather than a silently forgotten one.
+      # The runtime container's root has no password. rc4's package SETS a FIXED
+      # default (`TollGate`) on root when none exists (#913) and no longer refuses
+      # the install on an empty hash, so the TOLLGATE_ALLOW_EMPTY_ROOT hatch that
+      # rc3 needed is gone.
       - name: Test via Docker container
         if: ${{ matrix.runtime_test && fromJSON(env.HAVE_PKGS) && steps.runtime_image.outputs.available == 'true' }}
         continue-on-error: true

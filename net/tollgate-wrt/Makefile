@@ -455,7 +455,79 @@ PKG_NAME:=tollgate-wrt
 # feed's admin gate as 92 (before 99), so a fresh hand-install left the board
 # off the air; feed #57 moved it to 999, and this pin brings the module's own
 # recipe into agreement.
-PKG_VERSION:=0.6.0_rc1_pre27
+# ---------------------------------------------------------------------------
+# pre28 RE-VENDORS the captive-portal bundle and does nothing else: the module
+# pin (b6f7aa74), PKG_SOURCE_TAG and PKG_HASH are UNCHANGED. The portal pin
+# moves 752df98 -> 1fe13613 (OpenTollGate/tollgate-captive-portal-site main,
+# carrying portal #68 "forced password choice at first login").
+#   * vendor.lock.json portal_commit and its file hashes are regenerated from the
+#     bundle built at 1fe13613. The guest-portal SPA is byte-identical to
+#     752df98 (every guest asset hash is unchanged); only the admin board
+#     changed: assets/index-BByUkaK1.js -> index-DIm5Sxi1.js and the admin
+#     index.html.
+#   * the vendored rpcd plugin (openwrt/rpcd/tollgate) and its ACL changed at
+#     this pin and are re-vendored byte-for-byte; the drift guard
+#     (.github/scripts/check-vendor-drift.sh) and the lock verify
+#     (scripts/build-portal-bundle.sh) both pass locally.
+#   * the vendored 92-tollgate-admin-setup is UNCHANGED at this pin.
+# ---------------------------------------------------------------------------
+# pre29 ships the board + password-UX fixes:
+#   * the module pin moves to 67407a96 -- the head of the
+#     fix/board-first-run-no-print branch (PR OpenTollGate/tollgate-module-basic-go#850),
+#     which STOPS printing the generated admin/WiFi credentials and adds
+#     TOLLGATE_PRIVATE_WIFI_PASSWORD. NOTE: that PR is blocked on a required
+#     approving review; this pin is the branch head, NOT main, so it must be
+#     moved to the merged main commit before the RC is cut.
+#   * the portal is re-vendored to c11e6053 (main, PR #70): the pre-auth
+#     first-run page that sets root + private-WiFi; rpcd + ACL re-vendored.
+#   * feed #71 (already on main) keeps LuCI on the secondary pair (early entry_ui
+#     announcer 91-tollgate-admin-ui-mode).
+# RC1 (v0.6.0-rc1) -- the release candidate. The only content beyond pre31 is
+#   the PIN MOVE to the MERGED module main a2117251, replacing pre31's
+#   branch-head pin (4475a16): module #896 (never generate an admin credential)
+#   and #897 (read the operator credential from a root-only file too, because
+#   apk-tools 3 does not forward the environment to package scriptlets) are both
+#   on main now. PKG_HASH moves WITH the pin; the portal lock (c11e6053) and
+#   PKG_SOURCE_TAG (v0.6.0-rc1) are deliberately UNCHANGED.
+#   PKG_VERSION is 0.6.0_rc1 -- the pre-release line was 0.6.0_rc1_preN and
+#   0.6.0_rc1_preN < 0.6.0_rc1 (see the ordering comment above), so a device on
+#   pre31 upgrades to rc1 normally.
+#   Verified live before this cut (GL-MT3000): apk 25.12.5 + root-only file ->
+#   board served; apk + no credential -> board refused (fail closed); opkg
+#   24.10.8 + TOLLGATE_ADMIN_PASSWORD env -> board served; tollgate-installer
+#   rc19 vs pre31 -> step 4 set the supplied password, no stall, board served.
+#
+#   v0.6.0-rc2 is the PIN MOVE to the merged module main f89c879, on top of
+#   rc1's a2117251: module #902 (the package never SETS a credential — admin or
+#   private-WiFi — it only ascertains one and leaves the private AP DISABLED
+#   until a passphrase is set) and #903 (VERSION v0.6.0-rc2). PKG_SOURCE_TAG
+#   moves with the tarball's VERSION (v0.6.0-rc1 -> v0.6.0-rc2); PKG_HASH moves
+#   WITH the pin; the portal lock (c11e6053) is UNCHANGED. PKG_VERSION is
+#   0.6.0_rc2, so 0.6.0_rc2 > 0.6.0_rc1 and an rc1 device upgrades normally.
+#
+#   v0.6.0-rc3 is the PIN MOVE to the merged module main 27baf22: module #907
+#   (the package REFUSES to install when root has no password — the preinst exits
+#   non-zero on an empty /etc/shadow hash, so nothing is half-installed and the
+#   operator is told to `passwd root` and retry). PKG_SOURCE_TAG moves with the
+#   tarball's VERSION (v0.6.0-rc2 -> v0.6.0-rc3); PKG_HASH moves WITH the pin; the
+#   portal lock (c11e6053) is UNCHANGED. PKG_VERSION is 0.6.0_rc3.
+#
+#   v0.6.0-rc4 is the PIN MOVE to the merged module main 8a5c8b38: module #913
+#   REVERSES rc3's refusal. The package now SETS a FIXED DEFAULT credential
+#   (`TollGate`) on root when none exists and marks it PROVISIONAL, and sets the
+#   private (management) WiFi key to the same default and ENABLES the AP (rc2/rc3
+#   left it disabled). The admin/config UI then forces the owner to choose their
+#   own credentials at first login (a separate, post-release portal change). A
+#   fixed default is never a random one — a value the owner cannot know is the
+#   lockout this work exists to prevent. The package still accepts NO install-time
+#   credential, preserves an owner's own, and still fails CLOSED if the default
+#   write cannot take. PKG_SOURCE_TAG moves with the tarball's VERSION
+#   (v0.6.0-rc3 -> v0.6.0-rc4); PKG_HASH moves WITH the pin; the portal lock
+#   (c11e6053) is UNCHANGED. RC5 advances PKG_VERSION to 0.6.0_rc5 for the
+#   merged module cf7cad34 (#940, bounded mint registration); PKG_SOURCE_TAG
+#   stays v0.6.0-rc4 because the module repo-root VERSION is unchanged at that
+#   commit, and the portal lock is UNCHANGED.
+PKG_VERSION:=0.6.0_rc6
 # PKG_SOURCE_VERSION is the upstream source pin: an immutable 40-char COMMIT
 # SHA, NOT a tag and NOT a branch. A shared community feed must not chase a
 # moving branch (hash churn, unreproducible builds, every consumer gets
@@ -527,7 +599,11 @@ PKG_VERSION:=0.6.0_rc1_pre27
 # deliberately left alone: the tarball's own VERSION file is still
 # v0.6.0-alpha4 (Gate B enforces it on every run), and none of the four touches
 # portal content.
-PKG_SOURCE_VERSION:=b6f7aa74d6262567e0f2a8baf2fa8e9502fa32c9
+# RC1 advances the pin to a2117251 -- the MERGED module main (PRs #896 + #897).
+# RC2 advances it to f89c879, RC3 to 27baf22, RC4 to 8a5c8b38 -- the MERGED
+# module main after #913 (the fixed-default-credential reversal) -- and RC5 to
+# cf7cad34, the MERGED module main after #940 (bounded mint registration).
+PKG_SOURCE_VERSION:=cf7cad34677e87e775e7f16786b1bbf18c4bc8bc
 # PKG_SOURCE_TAG names the upstream release this commit belongs to. It is used
 # ONLY for the version string baked into the binaries, so a tester sees which
 # release the build came from instead of a bare SHA.
@@ -550,7 +626,7 @@ PKG_SOURCE_VERSION:=b6f7aa74d6262567e0f2a8baf2fa8e9502fa32c9
 # writes a setup marker no upstream build writes, and an unchanged marker sends
 # an upgrade down 99-tollgate-setup's same-version path where the new full-setup
 # work never runs.
-PKG_SOURCE_TAG:=v0.6.0-rc1
+PKG_SOURCE_TAG:=v0.6.0-rc4
 # Short SHA for that human-facing version string; the full SHA stays in
 # GitCommit, which is what a bug report should quote.
 PKG_SOURCE_SHA7:=$(shell printf '%s' $(PKG_SOURCE_VERSION) | cut -c1-7)
@@ -642,8 +718,20 @@ PKG_SOURCE:=tollgate-module-basic-go-$(PKG_SOURCE_VERSION).tar.gz
 # carried across a pin move: Gate A below fails a moved pin whose hash was not
 # recalibrated, and this value comes from a fresh download of the NEW pin, not
 # from the outgoing one.
+# RC1 re-calibrated on its pin move: a fresh download of the a2117251 tarball
+# yields
+# 60a8a10dcb6870c8d0641325f463e3316fdf27f96d15a6eb784fb7f497e9eebd -- the value
+# committed below (codeload reports 1873103 bytes for it).
+# RC4 re-calibrated on its pin move: a fresh download of the 8a5c8b38 tarball
+# yields
+# 1a391ca26b41acf921d22ef4f87758c1c701553b3bbaad2326b5562269e51a86 -- the value
+# committed below (codeload reports 1877402 bytes for it).
+# RC5 re-calibrated on its pin move: a fresh download of the cf7cad34 tarball
+# yields
+# 0dd6df217872b3836dd484c0a8110019c51372cff8c1d0e9e21bbe8a081f53cd -- the value
+# committed below (codeload reports 1884063 bytes for it).
 PKG_SOURCE_URL:=https://codeload.github.com/OpenTollGate/tollgate-module-basic-go/tar.gz/$(PKG_SOURCE_VERSION)?
-PKG_HASH:=6bf16f638e9adcda7125ce7010eb02ae41bdedf28056a9b8b12682001e46f79e
+PKG_HASH:=0dd6df217872b3836dd484c0a8110019c51372cff8c1d0e9e21bbe8a081f53cd
 
 PKG_MAINTAINER:=Felix <felix@tollgate.me>
 PKG_LICENSE:=GPL-3.0-only
@@ -780,12 +868,41 @@ define Build/Compile
 		$(GO_PKG_VARS) go build -trimpath \
 			-ldflags "$(GO_PKG_LDFLAGS_X:%=-X %) -X main.version=$(PKG_SOURCE_TAG)-g$(PKG_SOURCE_SHA7)" \
 			-o $(GO_PKG_BUILD_BIN_DIR)/tollgate-cli .
+# The CVM control-plane daemon (src/cmd/tollgate-cvm, its own module): the
+# THIRD binary upstream ships (packaging/Makefile PREBUILT_CVM). Built with
+# NO version ldflags on purpose -- the daemon's build identity travels in
+# its CEP-6 announcement pubkey, and upstream's own lanes stage it the same
+# way (local-build-ipk.sh, build-sdk-package.sh). Upstream broke its apk
+# lane for exactly this omission (#1020), then added the generated build
+# contract (upstream #1021: packaging/build-contract.json IN the release
+# tarball) so feeds stop re-deriving the binary set by hand.
+#
+# PRESENCE-CONDITIONAL, deliberately: the current pin (cf7cad3) predates
+# the daemon's landing, and OpenWrt recipes must build what the PINNED tree
+# contains, not what upstream main contains. The contract fence
+# (test-build-contract.sh Gate 1) refuses a pin that carries the contract
+# but not the stanza -- and the contract lands in the same tree that
+# guarantees the module exists -- so from the next repin the conditional is
+# always-true and the fence owns the set. Older pins skip both halves.
+	if [ -d $(PKG_BUILD_DIR)/cmd/tollgate-cvm ]; then \
+		cd $(PKG_BUILD_DIR)/cmd/tollgate-cvm && \
+			$(GO_PKG_VARS) go build -trimpath \
+				-o $(GO_PKG_BUILD_BIN_DIR)/tollgate-cvm .; \
+	fi
 endef
 
 define Package/tollgate-wrt/preinst
 #!/bin/sh
 
 [ -n "$${IPKG_INSTROOT:-}" ] && exit 0
+
+# No credential gate here any more. rc3 REFUSED to install when root had no
+# password (the :8090 board's login is checked against root's /etc/shadow hash,
+# and rpcd accepts ANY password while it is empty). rc4 reverses that: the
+# package's 99-tollgate-setup sets a FIXED default (`TollGate`) on root when none
+# exists and marks it PROVISIONAL, and the admin/config UI forces a change at
+# first login — so a password-less install is never left unauthenticatable and
+# never locks the operator out. Mirrors the module's own preinst (now a no-op).
 
 # Record the install timestamp so the captive portal / wizard can show it.
 if [ -f /etc/tollgate/install.json ]; then
@@ -847,14 +964,19 @@ wait_for_iface() {
 	return 1
 }
 
-# Run the three uci-defaults scripts the package just installed, in the SAME
-# order the module's own packaging does: captive-portal symlink (90), credential
-# setup (99), then the fail-closed admin gate LAST (999). The gate refuses to
-# serve the admin board unless it can find a credential, so it MUST run after
-# 99-tollgate-setup has created one -- running it first on a fresh flash fails
-# closed and locks the operator out. This list names INSTALLED paths, so it must
-# track 999-tollgate-admin-setup in Package/tollgate-wrt/install below.
+# Run the uci-defaults scripts the package just installed, in the SAME order the
+# module's own packaging does: captive-portal symlink (90), the entry_ui mapping
+# announcement (91), credential setup (99), then the fail-closed admin gate LAST
+# (999). The gate refuses to serve the admin board unless it can find a
+# credential, so it MUST run after 99-tollgate-setup has created one -- running
+# it first on a fresh flash fails closed and locks the operator out. And 91 MUST
+# run before 99: 99 resolves board-vs-luci from /etc/tollgate/entry-ui-mapping,
+# so without the early announcement it resolves `luci`, puts LuCI on the entry
+# pair, and the gate (999) then strips that pair to hand it to the board --
+# leaving LuCI listenerless (the pre28 bench finding). This list names INSTALLED
+# paths, so it must track the install recipe below.
 for script in /etc/uci-defaults/90-tollgate-captive-portal-symlink \
+              /etc/uci-defaults/91-tollgate-admin-ui-mode \
               /etc/uci-defaults/99-tollgate-setup \
               /etc/uci-defaults/999-tollgate-admin-setup; do
 	if [ -x "$$script" ]; then
@@ -867,6 +989,18 @@ echo "Restarting network..."
 /etc/init.d/network restart 2>/dev/null || true
 wait_for_iface br-lan
 wait_for_iface br-private || echo "Note: br-private not found — this is expected on devices without a private network configured."
+
+# The uplink lease can arrive only AFTER the restart above, so the private subnet
+# chosen at uci-defaults time may now collide with the upstream — a router that
+# answers for the upstream gateway's own address breaks DNS. Re-check now that
+# the uplink is up, and reload the network only if the private subnet had to move.
+# (Mirrors the module's packaging/Makefile at PKG_SOURCE_VERSION — module #926.)
+if [ -x /etc/uci-defaults/99-tollgate-setup ]; then
+    ( TOLLGATE_SETUP_LIB_ONLY=1 . /etc/uci-defaults/99-tollgate-setup 2>/dev/null
+      if command -v recheck_private_subnet >/dev/null 2>&1; then
+          recheck_private_subnet && /etc/init.d/network restart 2>/dev/null || true
+      fi )
+fi
 
 echo "Reloading remaining services..."
 wifi reload 2>/dev/null || true
@@ -910,12 +1044,21 @@ define Package/tollgate-wrt/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(GO_PKG_BUILD_BIN_DIR)/tollgate-module-basic-go $(1)/usr/bin/tollgate-wrt
 	$(INSTALL_BIN) $(GO_PKG_BUILD_BIN_DIR)/tollgate-cli $(1)/usr/bin/tollgate
+	@if [ -e $(GO_PKG_BUILD_BIN_DIR)/tollgate-cvm ]; then \
+		$(INSTALL_BIN) $(GO_PKG_BUILD_BIN_DIR)/tollgate-cvm $(1)/usr/bin/tollgate-cvm; \
+	fi
 
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(PKG_TARBALL_DIR)/packaging/files/etc/init.d/tollgate-wrt $(1)/etc/init.d/
 
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) $(PKG_TARBALL_DIR)/packaging/files/etc/uci-defaults/90-tollgate-captive-portal-symlink $(1)/etc/uci-defaults/
+	# The early entry_ui mapping announcer is FEED-owned (not the module
+	# tarball): it exists so 99-tollgate-setup, which runs BEFORE the board's
+	# 92/999, resolves the same board-vs-luci mapping and puts LuCI on the
+	# secondary pair instead of the entry pair. See the file's header and
+	# test-uci-defaults-order.sh.
+	$(INSTALL_BIN) $(PKG_MAKEFILE_DIR)files/uci-defaults/91-tollgate-admin-ui-mode $(1)/etc/uci-defaults/
 	$(INSTALL_BIN) $(PKG_TARBALL_DIR)/packaging/files/etc/uci-defaults/99-tollgate-setup $(1)/etc/uci-defaults/
 	# 99-tollgate-setup ships with a literal __TOLLGATE_VERSION__ placeholder in
 	# SETUP_VERSION= and MUST be substituted at install time. Both of upstream's
